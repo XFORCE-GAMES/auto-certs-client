@@ -99,7 +99,11 @@ jobs:
         run: |
           set -euo pipefail
           tarball="${{ steps.build.outputs.tarball }}"
+          # cosign v4 defaults to the new bundle format; the README's
+          # verify commands use the legacy --signature + --certificate
+          # form. Force legacy via --new-bundle-format=false.
           cosign sign-blob --yes \
+            --new-bundle-format=false \
             --output-signature "${tarball}.sig" \
             --output-certificate "${tarball}.crt" \
             "$tarball"
