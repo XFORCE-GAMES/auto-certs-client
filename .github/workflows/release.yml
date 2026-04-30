@@ -135,6 +135,11 @@ jobs:
           cat SHA256SUMS
 
       - name: Generate SLSA build-provenance attestation
+        # GitHub-managed attestations are free for public repos but
+        # gated by org billing on private repos. While this repo is
+        # PRIVATE during pre-GA, skip the step. It auto-enables when
+        # the repo flips to public at first-CP go-live.
+        if: ${{ github.event.repository.visibility == 'public' }}
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
         with:
           subject-path: |
