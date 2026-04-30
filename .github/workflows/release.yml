@@ -90,7 +90,14 @@ jobs:
           tar -tzf "$tarball" | head -20
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
+        # Pinned to v3.10.1 (cosign 2.x — legacy --sig + --crt outputs
+        # supported without flag toggles). v4 of the installer pulls
+        # cosign 3+, which deprecates the legacy format and requires
+        # explicit --bundle / --new-bundle-format flags. Sticking with
+        # the 2.x flow keeps the README's `cosign verify-blob` commands
+        # simple and matches the pattern most CP MIS teams will already
+        # be familiar with from other open-source releases.
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5  # v3.10.1
 
       - name: Sign tarball with cosign (keyless OIDC)
         shell: bash
@@ -99,11 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           tarball="${{ steps.build.outputs.tarball }}"
-          # cosign v4 defaults to the new bundle format; the README's
-          # verify commands use the legacy --signature + --certificate
-          # form. Force legacy via --new-bundle-format=false.
           cosign sign-blob --yes \
-            --new-bundle-format=false \
             --output-signature "${tarball}.sig" \
             --output-certificate "${tarball}.crt" \
             "$tarball"
