@@ -1,0 +1,19 @@
+# Build / release artifacts (release.yml produces these in CI; never
+# commit local copies).
+*.tar.gz
+*.tar.gz.sig
+*.tar.gz.crt
+*.spdx.json
+SHA256SUMS
+
+# Editor / OS noise.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local-only test artifacts.
+test/_tmp/
+test/fixtures/local-*

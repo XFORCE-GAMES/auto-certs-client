@@ -1,0 +1,18 @@
+# Shell scripts MUST use LF line endings — they run on Linux.
+# Windows-side checkouts that get CRLF will fail with cryptic errors
+# like `: not found` (the `\r` becomes part of the command name).
+*.sh        text eol=lf
+*.placeholder text eol=lf
+*.conf      text eol=lf
+launcher.sh text eol=lf
+install.sh  text eol=lf
+VERSION     text eol=lf
+
+# Markdown / YAML / JSON — same convention for consistency.
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.json      text eol=lf
+
+# Default: let git decide.
+*           text=auto

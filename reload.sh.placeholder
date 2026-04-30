@@ -1,0 +1,48 @@
+#!/bin/sh
+# auto-certs reload hook — PLACEHOLDER. Edit this to do whatever your
+# stack needs after a new cert lands.
+#
+# Environment provided by the launcher when it invokes this script:
+#   AUTO_CERTS_APP_CODE         e.g. "game_a"
+#   AUTO_CERTS_BASE_DOMAIN      e.g. "game_a.wakool.net"
+#   AUTO_CERTS_CERT_DIR         where the new files just landed; e.g.
+#                               "/etc/auto-certs/game_a.wakool.net"
+#                               (contains: cert.pem, chain.pem,
+#                               fullchain.pem, privkey.pem, optionally
+#                               keystore.jks)
+#   AUTO_CERTS_PREVIOUS_DIR     same path with `.previous` suffix; the
+#                               last bundle, kept for forensic + manual
+#                               MIS rollback only — DO NOT auto-rollback.
+#
+# Examples (uncomment + adapt):
+#
+#   ## nginx
+#   # service nginx reload
+#
+#   ## apache (RHEL family)
+#   # service httpd graceful
+#
+#   ## tomcat (when JKS bundle present — need to copy keystore.jks first)
+#   # cp "$AUTO_CERTS_CERT_DIR/keystore.jks" /var/lib/tomcat9/conf/keystore.jks
+#   # systemctl restart tomcat9
+#
+#   ## haproxy
+#   # cat "$AUTO_CERTS_CERT_DIR/fullchain.pem" "$AUTO_CERTS_CERT_DIR/privkey.pem" \
+#   #   > /etc/haproxy/ssl/$AUTO_CERTS_BASE_DOMAIN.pem
+#   # systemctl reload haproxy
+#
+#   ## multi-service (the redistribution point):
+#   # cp "$AUTO_CERTS_CERT_DIR/fullchain.pem" /etc/nginx/ssl/server.crt
+#   # cp "$AUTO_CERTS_CERT_DIR/privkey.pem"   /etc/nginx/ssl/server.key
+#   # service nginx reload
+#   # cp "$AUTO_CERTS_CERT_DIR/keystore.jks"  /opt/myapp/conf/keystore.jks
+#   # /opt/myapp/bin/restart.sh
+#
+# This script's stdout + stderr are captured and sent in the report-back
+# (post-redaction). Exit 0 on success; non-zero exit triggers a MIS
+# alert. Time-boxed by the launcher (default 60s).
+
+set -eu
+
+echo "auto-certs: reload hook placeholder. Edit /opt/auto-certs/reload.sh." >&2
+exit 1
