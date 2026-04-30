@@ -1,0 +1,17 @@
+version: 2
+
+updates:
+  # Refresh GitHub Action commit SHAs via PR. We pin every action to a
+  # commit SHA per CLAUDE.md "Operational essentials" (GhostAction lesson),
+  # so Dependabot is the only ergonomic way to keep them current.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "ci"
+      - "dependencies"

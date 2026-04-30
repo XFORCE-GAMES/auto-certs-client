@@ -160,10 +160,17 @@ send_report() {
         log_info "report sent (retry)"
         return 0
     fi
-    # Queue.
+    # Queue. Filename is <timestamp>-<pid>-<rand>.json:
+    #   - $_ts: epoch seconds (collisions only across processes inside
+    #     the same second).
+    #   - $$: PID (distinguishes parallel cron ticks if any).
+    #   - awk-driven 5-digit random: belt-and-suspenders entropy in case
+    #     two siblings inherit the same PID-modulo behavior.
+    # We avoid $RANDOM (bash-only; not POSIX).
     mkdir -p "$_queue" 2>/dev/null || true
     _ts=$(date +%s)
-    _qfile="$_queue/${_ts}-${RANDOM:-$$}.json"
+    _rand=$(awk 'BEGIN{srand(); printf "%05d\n", int(rand()*100000)}' 2>/dev/null || echo "00000")
+    _qfile="$_queue/${_ts}-$$-${_rand}.json"
     if cp "$_payload" "$_qfile" 2>/dev/null; then
         log_warn "report send failed twice; queued at $_qfile"
     else

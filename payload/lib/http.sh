@@ -1,5 +1,12 @@
 # auto-certs HTTP client — POSIX sh, curl-or-wget abstraction.
 # Sourced (not executed).
+#
+# We construct argument lists via `set --` / `"$@"` so that values
+# containing whitespace (e.g. the bearer token if it ever contained
+# them; or the User-Agent string with embedded spaces) survive without
+# shell-mangling. The earlier `_auth="-H Authorization:Bearer\\ $_token"`
+# + unquoted-expansion pattern was buggy — the literal backslash
+# survived and curl received a malformed header name.
 
 # http_get <url> <output_file> [bearer_token] [extra_header_file]
 #
@@ -13,39 +20,34 @@ http_get() {
     _hdrout="${_out}.headers"
 
     if command -v curl >/dev/null 2>&1; then
-        _auth=""
+        # Build the args list. `set --` resets "$@" to the listed
+        # values; subsequent `set -- "$@" ...` appends. Quoting around
+        # each "$@" reference is required to preserve whitespace.
+        set -- --silent --show-error --fail-with-body \
+               --user-agent "auto-certs/$(payload_version 2>/dev/null || echo 0.0.0)" \
+               --connect-timeout 10 --max-time 60 \
+               --dump-header "$_hdrout" \
+               -o "$_out"
         if [ -n "$_token" ]; then
-            _auth="-H Authorization:Bearer\\ $_token"
+            set -- "$@" -H "Authorization: Bearer $_token"
         fi
-        # We use curl's --dump-header to capture response headers.
-        # eval is needed only because we want to splice $_auth conditionally;
-        # shell quoting around $_token is correct because we already
-        # ensured no shell-meaningful chars are present (token is acert_live_+base62).
-        # shellcheck disable=SC2086
-        curl --silent --show-error --fail-with-body \
-             --user-agent "auto-certs/$(payload_version 2>/dev/null || echo 0.0.0)" \
-             --connect-timeout 10 --max-time 60 \
-             --dump-header "$_hdrout" \
-             $_auth \
-             -o "$_out" \
-             "$_url"
+        set -- "$@" "$_url"
+        curl "$@"
         return $?
     fi
     if command -v wget >/dev/null 2>&1; then
-        _auth=""
-        if [ -n "$_token" ]; then
-            _auth="--header=Authorization:\\ Bearer\\ $_token"
-        fi
         # wget doesn't write response headers as cleanly; use --server-response
         # which emits them on stderr, capture there.
-        # shellcheck disable=SC2086
-        wget --quiet \
-             --user-agent="auto-certs/$(payload_version 2>/dev/null || echo 0.0.0)" \
-             --connect-timeout=10 --read-timeout=60 \
-             --server-response \
-             $_auth \
-             -O "$_out" \
-             "$_url" 2> "$_hdrout"
+        set -- --quiet \
+               --user-agent="auto-certs/$(payload_version 2>/dev/null || echo 0.0.0)" \
+               --connect-timeout=10 --read-timeout=60 \
+               --server-response \
+               -O "$_out"
+        if [ -n "$_token" ]; then
+            set -- "$@" --header="Authorization: Bearer $_token"
+        fi
+        set -- "$@" "$_url"
+        wget "$@" 2> "$_hdrout"
         return $?
     fi
     log_error "neither curl nor wget available"
@@ -76,34 +78,31 @@ http_post_json() {
     _resp="${_payload}.resp"
 
     if command -v curl >/dev/null 2>&1; then
-        _auth=""
+        set -- --silent --show-error --fail-with-body \
+               --user-agent "auto-certs/$(payload_version 2>/dev/null || echo 0.0.0)" \
+               --connect-timeout 10 --max-time 60 \
+               -H "Content-Type: application/json" \
+               --data-binary "@$_payload" \
+               -o "$_resp"
         if [ -n "$_token" ]; then
-            _auth="-H Authorization:Bearer\\ $_token"
+            set -- "$@" -H "Authorization: Bearer $_token"
         fi
-        # shellcheck disable=SC2086
-        curl --silent --show-error --fail-with-body \
-             --user-agent "auto-certs/$(payload_version 2>/dev/null || echo 0.0.0)" \
-             --connect-timeout 10 --max-time 60 \
-             -H "Content-Type: application/json" \
-             $_auth \
-             --data-binary "@$_payload" \
-             -o "$_resp" \
-             "$_url"
+        set -- "$@" "$_url"
+        curl "$@"
         return $?
     fi
     if command -v wget >/dev/null 2>&1; then
-        _hdrs="--header=Content-Type:\\ application/json"
+        set -- --quiet \
+               --user-agent="auto-certs/$(payload_version 2>/dev/null || echo 0.0.0)" \
+               --connect-timeout=10 --read-timeout=60 \
+               --header="Content-Type: application/json" \
+               --post-file="$_payload" \
+               -O "$_resp"
         if [ -n "$_token" ]; then
-            _hdrs="$_hdrs --header=Authorization:\\ Bearer\\ $_token"
+            set -- "$@" --header="Authorization: Bearer $_token"
         fi
-        # shellcheck disable=SC2086
-        wget --quiet \
-             --user-agent="auto-certs/$(payload_version 2>/dev/null || echo 0.0.0)" \
-             --connect-timeout=10 --read-timeout=60 \
-             $_hdrs \
-             --post-file="$_payload" \
-             -O "$_resp" \
-             "$_url"
+        set -- "$@" "$_url"
+        wget "$@"
         return $?
     fi
     log_error "neither curl nor wget available"

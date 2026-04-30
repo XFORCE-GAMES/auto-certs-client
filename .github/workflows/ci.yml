@@ -1,0 +1,97 @@
+# CI — runs on every PR and on push to main.
+#
+# - shellcheck-all: POSIX-sh static analysis. The client targets POSIX
+#   sh per Phase 4 §0 (CentOS 6 floor). Strict shellcheck is the load-
+#   bearing readability gate the CP MIS audit relies on.
+# - syntax-check: runs `sh -n` against each script. Catches parse errors
+#   that shellcheck might miss in pathological cases (rare; cheap).
+#
+# All third-party actions pinned to commit SHA per CLAUDE.md
+# "Operational essentials" (GhostAction lesson). Dependabot refreshes
+# them via PR (.github/dependabot.yml).
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck-all:
+    name: shellcheck (POSIX sh)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Run shellcheck
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38  # 2.0.0
+        env:
+          # SC1090: "Can't follow non-constant source." We use `. "$LIB_DIR/foo.sh"`
+          #   pattern because $LIB_DIR is determined at runtime from the launcher's
+          #   payload-dir resolution. Suppress.
+          # SC2034: "variable appears unused." False-positive when shellcheck doesn't
+          #   follow the source chain — RC_OK, RC_GENERIC, JKS_PASSWORD, etc. are
+          #   used in other lib files that get sourced into the same env.
+          SHELLCHECK_OPTS: -s sh -S warning -e SC1090,SC2034
+        with:
+          # Fail on warnings AND errors. Style/info notes are advisory.
+          severity: warning
+          # Don't recurse into vendored test fixtures (none today; future-proof).
+          ignore_paths: test/_tmp test/fixtures
+          ignore_names: '.gitattributes'
+
+  syntax-check:
+    name: sh -n (parse-only)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Parse each script
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r f; do
+            # Use /bin/sh (dash on Ubuntu) to match the CentOS-6 sh
+            # parsing behavior more closely than bash.
+            if ! /bin/sh -n "$f" 2>&1; then
+              echo "::error file=$f::failed sh -n"
+              fail=1
+            fi
+          done < <(find . -type f \( -name '*.sh' -o -name '*.placeholder' \) -not -path './.git/*')
+          exit "$fail"
+
+  loc-budget:
+    name: payload LOC budget
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Count
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Phase 4 §0 originally specified a hard cap (≤500 lines for
+          # combined payload/auto_certs.sh + payload/lib/*.sh). The
+          # implementation landed slightly higher and was operator-
+          # blessed; we now enforce a regression-detection cap that
+          # leaves headroom for ongoing maintenance but rejects
+          # unbounded growth.
+          launcher_loc=$(wc -l < launcher.sh)
+          payload_loc=$(cat payload/auto_certs.sh payload/lib/*.sh | wc -l)
+          install_loc=$(wc -l < install.sh)
+          echo "launcher.sh                         : $launcher_loc lines (cap: 80)"
+          echo "payload/auto_certs.sh + lib/*.sh    : $payload_loc lines (cap: 1500)"
+          echo "install.sh                          : $install_loc lines (cap: 400)"
+          fail=0
+          [ "$launcher_loc" -le 80 ] || { echo "::error::launcher.sh exceeds cap"; fail=1; }
+          [ "$payload_loc"  -le 1500 ] || { echo "::error::payload total exceeds cap"; fail=1; }
+          [ "$install_loc"  -le 400 ] || { echo "::error::install.sh exceeds cap"; fail=1; }
+          exit "$fail"

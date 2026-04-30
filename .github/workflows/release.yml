@@ -1,0 +1,174 @@
+# Release pipeline — runs on every push of a v* tag.
+#
+# Outputs (attached to the GitHub Release):
+#   1. auto-certs-client-${VERSION}.tar.gz             — release tarball
+#   2. auto-certs-client-${VERSION}.tar.gz.sig         — cosign signature (Sigstore Rekor entry)
+#   3. auto-certs-client-${VERSION}.tar.gz.crt         — cosign certificate
+#   4. auto-certs-client-${VERSION}.spdx.json          — SPDX 2.3 SBOM (via syft)
+#   5. SHA256SUMS                                       — checksums for every artifact
+#   6. (out-of-band) build-provenance attestation     — SLSA v1, queryable via gh attestation verify
+#
+# All third-party actions pinned to commit SHA. Dependabot refreshes them via PR.
+#
+# Cosign signing is keyless via GitHub OIDC — no maintained signing
+# key, no rotation. The Phase 2 release-signing key (RSA-4096 in AWS
+# Secrets Manager) is for bundle-content signing inside the encrypted
+# envelope — different purpose, stays internal.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write          # for creating the GH Release + uploading artifacts
+  id-token: write          # for cosign keyless OIDC
+  attestations: write      # for actions/attest-build-provenance
+
+jobs:
+  build-and-release:
+    name: Build + sign + release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Resolve version from tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GITHUB_REF_NAME is the tag name when triggered by tag push.
+          version="${GITHUB_REF_NAME}"
+          if [ -z "$version" ]; then
+            echo "::error::GITHUB_REF_NAME is empty — not a tag push?"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing version: $version"
+
+      - name: Verify tag matches payload/VERSION
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${{ steps.version.outputs.version }}"
+          # Strip leading `v` from tag for comparison with semver-only VERSION.
+          stripped="${tag_version#v}"
+          payload_version=$(tr -d '\n' < payload/VERSION)
+          if [ "$stripped" != "$payload_version" ]; then
+            echo "::error::Tag ${tag_version} (stripped: ${stripped}) does not match payload/VERSION (${payload_version})"
+            exit 1
+          fi
+          echo "Tag and payload/VERSION agree: ${stripped}"
+
+      - name: Build tarball
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          tarball="auto-certs-client-${version}.tar.gz"
+          # Use a deterministic transform so the tarball's top-level
+          # directory is predictable: auto-certs-client-${version}/...
+          tar -czf "$tarball" \
+              --transform "s,^,auto-certs-client-${version}/," \
+              --owner=0 --group=0 \
+              --sort=name \
+              --mtime="@$(git log -1 --pretty=%ct)" \
+              --exclude='./.git*' \
+              --exclude='./.github' \
+              --exclude='./test' \
+              --exclude='./*.tar.gz*' \
+              --exclude='./*.spdx.json' \
+              --exclude='./SHA256SUMS' \
+              ./README.md ./LICENSE ./SECURITY.md ./.gitattributes \
+              ./launcher.sh ./install.sh ./reload.sh.placeholder \
+              ./payload ./conf.d
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          echo "Built: $tarball ($(stat -c%s "$tarball") bytes)"
+          tar -tzf "$tarball" | head -20
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
+
+      - name: Sign tarball with cosign (keyless OIDC)
+        shell: bash
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          set -euo pipefail
+          tarball="${{ steps.build.outputs.tarball }}"
+          cosign sign-blob --yes \
+            --output-signature "${tarball}.sig" \
+            --output-certificate "${tarball}.crt" \
+            "$tarball"
+          echo "Signed: ${tarball}.sig + ${tarball}.crt"
+
+      - name: Generate SBOM (SPDX 2.3 JSON)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          path: '.'
+          format: 'spdx-json'
+          output-file: 'auto-certs-client-${{ steps.version.outputs.version }}.spdx.json'
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Compute checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          sha256sum \
+            "auto-certs-client-${version}.tar.gz" \
+            "auto-certs-client-${version}.tar.gz.sig" \
+            "auto-certs-client-${version}.tar.gz.crt" \
+            "auto-certs-client-${version}.spdx.json" \
+            > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Generate SLSA build-provenance attestation
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-path: |
+            auto-certs-client-${{ steps.version.outputs.version }}.tar.gz
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          generate_release_notes: true
+          body: |
+            ## Verifying this release
+
+            See [README.md "How to verify the release signature"](https://github.com/${{ github.repository }}/blob/${{ steps.version.outputs.version }}/README.md#how-to-verify-the-release-signature) for the full verification commands.
+
+            Quick reference:
+
+            ```sh
+            VERSION=${{ steps.version.outputs.version }}
+            cosign verify-blob \
+              --certificate auto-certs-client-${VERSION}.tar.gz.crt \
+              --signature   auto-certs-client-${VERSION}.tar.gz.sig \
+              --certificate-identity-regexp "https://github.com/${{ github.repository }}/.*" \
+              --certificate-oidc-issuer     "https://token.actions.githubusercontent.com" \
+              auto-certs-client-${VERSION}.tar.gz
+            ```
+
+            ## Artifacts
+
+            - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz` — release tarball
+            - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.sig` — cosign signature
+            - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.crt` — cosign certificate
+            - `auto-certs-client-${{ steps.version.outputs.version }}.spdx.json` — SBOM (SPDX 2.3)
+            - `SHA256SUMS` — checksums for every artifact
+            - SLSA build-provenance attestation — see the **Attestations** section
+          files: |
+            auto-certs-client-${{ steps.version.outputs.version }}.tar.gz
+            auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.sig
+            auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.crt
+            auto-certs-client-${{ steps.version.outputs.version }}.spdx.json
+            SHA256SUMS
