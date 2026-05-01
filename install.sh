@@ -1,12 +1,31 @@
 #!/bin/sh
 # auto-certs installer.
 #
-# One-line install per CLAUDE.md "Quick start":
-#   curl -sSL https://auto-certs.xforce-games.com/install.sh \
-#     | sh -s -- --app <code> --token <…> --bundle-password <…> --base-domain <…>
+# Two-step CP onboarding (per docs/plans/install-flow-redesign.md):
 #
-# Idempotent: re-running upgrades the launcher + payload but never
-# overwrites a CP-edited reload.sh.
+#   STEP 1 — install (no secrets in argv, so nothing leaks to ~/.bash_history):
+#     curl -sSL https://github.com/XFORCE-GAMES/auto-certs-client/releases/latest/download/install.sh \
+#       | sudo sh -s -- --app <app_code>
+#
+#   STEP 2 — fill in the per-app config (the CP MIS pastes values from the
+#   per-app chat group into the placeholder file dropped here):
+#     sudo $EDITOR /etc/auto-certs/conf.d/<app_code>.conf
+#       # set API_TOKEN= and BUNDLE_PASSWORD=
+#
+#   STEP 3 — verify:
+#     sudo /opt/auto-certs/launcher.sh --once --app <app_code>
+#
+# Why two steps: secrets passed on a command line land in ~/.bash_history,
+# show up in `ps aux` for any local user during install, and get tee'd
+# into any session-recording. Editing the config file in place keeps
+# them at-rest in a 0600 file — the same shape every credential-aware
+# tool ships (kubectl, gh, doctl, etc.).
+#
+# Idempotent re-run:
+#   - Upgrades the launcher + payload tree.
+#   - Drops the placeholder reload hook IFF none exists (preserves CP edits).
+#   - Drops a placeholder per-app conf IFF the named conf doesn't exist
+#     (preserves CP-pasted secrets across upgrades).
 #
 # Per CLAUDE.md "Operating constraints":
 #   - POSIX sh
@@ -16,7 +35,7 @@
 #       /opt/auto-certs/payload-<version>/   (versioned dir)
 #       /opt/auto-certs/current               (symlink to active payload)
 #       /opt/auto-certs/reload.sh             (placeholder if absent — CP edits)
-#       /etc/auto-certs/conf.d/<app>.conf
+#       /etc/auto-certs/conf.d/<app>.conf     (placeholder if absent — CP fills in)
 #       /etc/auto-certs/machine_id            (lazy-generated; SEAL EXCLUDE)
 #       /var/log/auto-certs/                  (per-app log dir)
 #       /var/lib/auto-certs/queue/            (failed-report queue)
@@ -26,11 +45,6 @@ set -eu
 
 # ---- arg parsing ---------------------------------------------------------
 APP_CODE=""
-API_TOKEN=""
-BUNDLE_PASSWORD=""
-BASE_DOMAIN=""
-CERT_DIR=""
-HOOK_PATH=""
 SERVER_URL="https://auto-certs.xforce-games.com"
 INSTALL_ROOT="${AUTO_CERTS_INSTALL_ROOT:-/opt/auto-certs}"
 ETC_ROOT="${AUTO_CERTS_ETC_ROOT:-/etc/auto-certs}"
@@ -44,42 +58,59 @@ auto-certs install.sh — usage:
 
   install.sh \\
     --app <app_code> \\
-    --token <bearer_token> \\
-    --bundle-password <password> \\
-    --base-domain <subdomain.wakool.net> \\
-    [--cert-dir <path>] \\
-    [--hook <path>] \\
     [--server-url <url>] \\
     [--source-dir <path>]   # for local testing — copy from here instead of net
 
-Required: --app, --token, --bundle-password, --base-domain.
+Required: --app
+
+Secrets (API_TOKEN, BUNDLE_PASSWORD) are NOT taken on the command line —
+they would leak into ~/.bash_history and \`ps aux\`. Instead this installer
+drops a placeholder /etc/auto-certs/conf.d/<app_code>.conf with the
+required fields blank; you edit that file (mode 0600) to paste the
+values from the per-app chat group.
+
+Multi-app on one host: re-run with --app <other_code>. Existing
+configs are preserved.
 USAGE
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --app)             APP_CODE="$2"; shift 2 ;;
-        --token)           API_TOKEN="$2"; shift 2 ;;
-        --bundle-password) BUNDLE_PASSWORD="$2"; shift 2 ;;
-        --base-domain)     BASE_DOMAIN="$2"; shift 2 ;;
-        --cert-dir)        CERT_DIR="$2"; shift 2 ;;
-        --hook)            HOOK_PATH="$2"; shift 2 ;;
         --server-url)      SERVER_URL="$2"; shift 2 ;;
         --source-dir)      SOURCE_DIR="$2"; shift 2 ;;
+        # Friendly hard-fails on the old flag set so anyone copy-pasting a
+        # stale install one-liner gets a clear pointer to the new flow.
+        --token|--bundle-password|--base-domain|--cert-dir|--hook)
+            echo "auto-certs install: --$(echo "$1" | sed 's/^--//') is no longer accepted on the command line." >&2
+            echo "  Secrets and per-app config now live in /etc/auto-certs/conf.d/<app>.conf — see usage:" >&2
+            echo >&2
+            usage >&2
+            exit 2
+            ;;
         -h|--help)         usage; exit 0 ;;
         *)                 echo "unknown arg: $1" >&2; usage; exit 2 ;;
     esac
 done
 
-if [ -z "$APP_CODE" ] || [ -z "$API_TOKEN" ] || [ -z "$BUNDLE_PASSWORD" ] || [ -z "$BASE_DOMAIN" ]; then
-    echo "missing required arg(s)" >&2
-    usage
+if [ -z "$APP_CODE" ]; then
+    echo "auto-certs install: --app is required" >&2
+    usage >&2
     exit 2
 fi
 
-# Sensible defaults.
-: "${CERT_DIR:=$ETC_ROOT/${BASE_DOMAIN}}"
-: "${HOOK_PATH:=${INSTALL_ROOT}/reload.sh}"
+# Reject app_codes that would trip the conf-file naming convention.
+case "$APP_CODE" in
+    *[!a-zA-Z0-9_-]*|""|.|..|*/*)
+        echo "auto-certs install: --app must match [a-zA-Z0-9_-]+" >&2
+        exit 2
+        ;;
+esac
+
+# Default base_domain auto-derived from --app (per_app convention).
+# Recorded in the placeholder conf; CP can override post-install for
+# delegated-CNAME / custom-domain setups.
+BASE_DOMAIN_DEFAULT="${APP_CODE}.wakool.net"
 
 # ---- preflight ----------------------------------------------------------
 for _tool in openssl tar mv mktemp; do
@@ -138,28 +169,65 @@ mv -T "$INSTALL_ROOT/current.tmp" "$INSTALL_ROOT/current" 2>/dev/null || \
     mv "$INSTALL_ROOT/current.tmp" "$INSTALL_ROOT/current"
 
 # Drop placeholder reload.sh (only if absent — CP-editable post-install).
-if [ ! -f "$HOOK_PATH" ]; then
-    cp "$SOURCE_DIR/reload.sh.placeholder" "$HOOK_PATH"
-    chmod 755 "$HOOK_PATH"
-    echo "auto-certs install: dropped placeholder reload.sh — EDIT $HOOK_PATH to suit your stack."
+HOOK_PATH_DEFAULT="${INSTALL_ROOT}/reload.sh"
+if [ ! -f "$HOOK_PATH_DEFAULT" ]; then
+    cp "$SOURCE_DIR/reload.sh.placeholder" "$HOOK_PATH_DEFAULT"
+    chmod 755 "$HOOK_PATH_DEFAULT"
+    echo "auto-certs install: dropped placeholder reload.sh — EDIT $HOOK_PATH_DEFAULT to suit your stack."
 fi
 
-# Drop per-app config.
+# ---- per-app config placeholder -------------------------------------------
+# This is the CP MIS's only edit target for secrets. The required fields
+# (API_TOKEN, BUNDLE_PASSWORD) are blank; the launcher fails loudly with
+# a CP-actionable error if they stay blank past install.
 APP_CONF="$ETC_ROOT/conf.d/${APP_CODE}.conf"
-{
-    echo "# Auto-generated by install.sh on $(date)"
-    echo "APP_CODE=${APP_CODE}"
-    echo "BASE_DOMAIN=${BASE_DOMAIN}"
-    echo "API_TOKEN=${API_TOKEN}"
-    echo "BUNDLE_PASSWORD=${BUNDLE_PASSWORD}"
-    echo "SERVER_URL=${SERVER_URL}"
-    echo "CERT_DIR=${CERT_DIR}"
-    echo "HOOK_PATH=${HOOK_PATH}"
-    echo "HOOK_TIMEOUT_SECONDS=60"
-    echo "# Optional: LOCAL_TLS_TARGETS=\"127.0.0.1:443\""
-} > "$APP_CONF"
-chmod 600 "$APP_CONF"
-echo "auto-certs install: wrote $APP_CONF (mode 600)"
+TEMPLATE="$SOURCE_DIR/conf.d/example.conf.template"
+
+if [ -f "$APP_CONF" ]; then
+    echo "auto-certs install: $APP_CONF already exists — preserving CP edits."
+elif [ -r "$TEMPLATE" ]; then
+    # Fill the template's __APP_CODE__ / __BASE_DOMAIN__ / __SERVER_URL__
+    # markers; everything else stays as the template author wrote it.
+    # `sed` substitutions are literal — no shell interpretation of values
+    # since the values are constrained by the [a-zA-Z0-9_-]+ check above.
+    sed \
+        -e "s|__APP_CODE__|${APP_CODE}|g" \
+        -e "s|__BASE_DOMAIN__|${BASE_DOMAIN_DEFAULT}|g" \
+        -e "s|__SERVER_URL__|${SERVER_URL}|g" \
+        -e "s|__GENERATED_AT__|$(date)|g" \
+        "$TEMPLATE" > "${APP_CONF}.tmp"
+    mv "${APP_CONF}.tmp" "$APP_CONF"
+    chmod 600 "$APP_CONF"
+    echo "auto-certs install: dropped placeholder $APP_CONF (mode 600)"
+    echo "auto-certs install: EDIT $APP_CONF — set API_TOKEN= and BUNDLE_PASSWORD= from the per-app chat group."
+else
+    # Fallback: emit a minimal placeholder inline so the installer is
+    # robust against a missing/renamed template.
+    {
+        echo "# auto-certs per-app config — created by install.sh on $(date)"
+        echo "# EDIT the EMPTY fields below, save, then verify with:"
+        echo "#   sudo ${INSTALL_ROOT}/launcher.sh --once --app ${APP_CODE}"
+        echo ""
+        echo "APP_CODE=${APP_CODE}"
+        echo "BASE_DOMAIN=${BASE_DOMAIN_DEFAULT}"
+        echo "SERVER_URL=${SERVER_URL}"
+        echo ""
+        echo "# === REQUIRED — paste from the per-app chat group ==="
+        echo "API_TOKEN="
+        echo "BUNDLE_PASSWORD="
+        echo ""
+        echo "# === Optional ==="
+        echo "# CERT_DIR=${ETC_ROOT}/${BASE_DOMAIN_DEFAULT}"
+        echo "# HOOK_PATH=${HOOK_PATH_DEFAULT}"
+        echo "# HOOK_TIMEOUT_SECONDS=60"
+        echo "# JKS_PASSWORD="
+        echo "# LOCAL_TLS_TARGETS=\"127.0.0.1:443\""
+    } > "${APP_CONF}.tmp"
+    mv "${APP_CONF}.tmp" "$APP_CONF"
+    chmod 600 "$APP_CONF"
+    echo "auto-certs install: dropped placeholder $APP_CONF (mode 600; inline fallback)"
+    echo "auto-certs install: EDIT $APP_CONF — set API_TOKEN= and BUNDLE_PASSWORD= from the per-app chat group."
+fi
 
 # Lazy-generate machine_id.
 MACHINE_ID="$ETC_ROOT/machine_id"
@@ -179,10 +247,13 @@ if [ ! -s "$MACHINE_ID" ]; then
 fi
 
 # Cron entry. We pick a 0-59min jitter so a fleet-wide install-day doesn't
-# all hit the server at the same minute.
-JITTER=$(awk 'BEGIN{srand(); print int(rand()*60)}')
+# all hit the server at the same minute. Idempotent: re-running keeps the
+# same jitter if the cron file already exists.
 CRON_FILE="/etc/cron.d/auto-certs"
-if [ -w "$(dirname "$CRON_FILE")" ] || [ -w "$CRON_FILE" ] 2>/dev/null; then
+if [ -f "$CRON_FILE" ]; then
+    echo "auto-certs install: $CRON_FILE already exists — preserving."
+elif [ -w "$(dirname "$CRON_FILE")" ] 2>/dev/null; then
+    JITTER=$(awk 'BEGIN{srand(); print int(rand()*60)}')
     cat > "$CRON_FILE" <<CRON
 # auto-certs daily check — generated by install.sh
 ${JITTER} 3 * * * root ${INSTALL_ROOT}/launcher.sh >> ${LOG_ROOT}/cron.log 2>&1
@@ -190,6 +261,7 @@ CRON
     chmod 644 "$CRON_FILE"
     echo "auto-certs install: cron entry at $CRON_FILE (3:${JITTER} daily)"
 else
+    JITTER=$(awk 'BEGIN{srand(); print int(rand()*60)}')
     echo "auto-certs install: WARNING — could not write $CRON_FILE."
     echo "  Add this line to root's crontab manually:"
     echo "    ${JITTER} 3 * * * ${INSTALL_ROOT}/launcher.sh >> ${LOG_ROOT}/cron.log 2>&1"
@@ -197,5 +269,9 @@ fi
 
 echo
 echo "auto-certs install: DONE for $APP_CODE."
-echo "  - Edit reload hook: $HOOK_PATH"
-echo "  - Test now: ${INSTALL_ROOT}/launcher.sh --once --app ${APP_CODE}"
+echo "  Next steps:"
+echo "  1. EDIT ${APP_CONF}"
+echo "       set API_TOKEN= and BUNDLE_PASSWORD= from the per-app chat group."
+echo "  2. EDIT ${HOOK_PATH_DEFAULT}"
+echo "       replace the 'exit 1' default with your reload command."
+echo "  3. TEST: sudo ${INSTALL_ROOT}/launcher.sh --once --app ${APP_CODE}"

@@ -7,11 +7,14 @@
 # CP-configured reload hook, and reports the outcome back to the server.
 #
 # Modes (Phase 4 Step 8):
-#   (no args)        — process every configured app once. Default.
-#   --once           — same as default; explicit.
-#   --app <code>     — process only the named app.
-#   --diagnose       — emit redacted env/connectivity report; exit.
-#   --self-check     — validate config + tools + on-disk bundle; report.
+#   (no args)         — process every configured app once. Default.
+#   --once            — same as default; explicit.
+#   --app <code>      — process only the named app.
+#   --diagnose        — emit redacted env/connectivity report; exit.
+#   --self-check      — validate config + tools + on-disk bundle; report.
+#   --validate-config — read every *.conf, report missing required fields,
+#                       exit non-zero if any conf is incomplete. CP-friendly
+#                       sanity check after install + manual conf edit.
 #
 # All operating constraints enforced here:
 #   - POSIX sh only (no bashisms)
@@ -49,18 +52,20 @@ MODE="run"
 APP_FILTER=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --once)         MODE="run"; shift ;;
-        --app)          APP_FILTER="$2"; shift 2 ;;
-        --diagnose)     MODE="diagnose"; shift ;;
-        --self-check)   MODE="self_check"; shift ;;
+        --once)             MODE="run"; shift ;;
+        --app)              APP_FILTER="$2"; shift 2 ;;
+        --diagnose)         MODE="diagnose"; shift ;;
+        --self-check)       MODE="self_check"; shift ;;
+        --validate-config)  MODE="validate_config"; shift ;;
         -h|--help)
             cat <<'HELP'
 auto-certs payload — usage:
-  auto_certs.sh                # process every configured app
-  auto_certs.sh --once         # same as default; explicit
-  auto_certs.sh --app <code>   # process one app only
-  auto_certs.sh --diagnose     # print redacted env report
-  auto_certs.sh --self-check   # validate config/tools/bundles, report
+  auto_certs.sh                    # process every configured app
+  auto_certs.sh --once             # same as default; explicit
+  auto_certs.sh --app <code>       # process one app only
+  auto_certs.sh --diagnose         # print redacted env report
+  auto_certs.sh --self-check       # validate config/tools/bundles, report
+  auto_certs.sh --validate-config  # check every *.conf has required fields
 HELP
             exit 0
             ;;
@@ -122,7 +127,84 @@ if [ "$MODE" = "diagnose" ]; then
     exit 0
 fi
 
-# ---- run / self-check mode ----------------------------------------------
+# ---- run / self-check / validate-config mode ----------------------------
+#
+# Required-fields check shared by --validate-config and process_app.
+# Sets _MISSING_FIELDS to a space-separated list of missing field names
+# (empty => everything required is present). Caller is responsible for
+# `.`-sourcing the conf into the current shell first.
+check_required_fields() {
+    _MISSING_FIELDS=""
+    [ -z "${APP_CODE:-}" ]        && _MISSING_FIELDS="${_MISSING_FIELDS} APP_CODE"
+    [ -z "${BASE_DOMAIN:-}" ]     && _MISSING_FIELDS="${_MISSING_FIELDS} BASE_DOMAIN"
+    [ -z "${API_TOKEN:-}" ]       && _MISSING_FIELDS="${_MISSING_FIELDS} API_TOKEN"
+    [ -z "${BUNDLE_PASSWORD:-}" ] && _MISSING_FIELDS="${_MISSING_FIELDS} BUNDLE_PASSWORD"
+    # Trim leading space.
+    _MISSING_FIELDS=$(echo "$_MISSING_FIELDS" | sed 's/^ *//')
+}
+
+# Multi-line CP-actionable error pointing to the same chat-group flow
+# that `install.sh` reminds about. Goes to stderr AND the per-app log
+# (when one is reachable — we're called pre-LOG_DIR-default-resolution
+# in --validate-config, so we tolerate its absence).
+print_incomplete_config_error() {
+    _conf="$1"
+    _missing="$2"
+    cat >&2 <<ERR
+auto-certs: config $_conf is incomplete:
+  Missing or empty: $_missing
+
+To fix:
+  1. Open the file in an editor:  sudo \$EDITOR $_conf
+  2. Paste the values from your per-app chat group into the empty lines:
+       API_TOKEN=...
+       BUNDLE_PASSWORD=...
+  3. Save and re-run:
+       sudo /opt/auto-certs/launcher.sh --once --app <app_code>
+
+Note: secrets are NOT accepted on the command line — they would leak
+into ~/.bash_history and \`ps aux\`. They live at-rest in this 0600
+file only.
+ERR
+}
+
+# ---- validate-config mode -----------------------------------------------
+if [ "$MODE" = "validate_config" ]; then
+    _validate_any_failed=0
+    _validate_count=0
+    for c in "$CONF_DIR"/*.conf; do
+        [ -r "$c" ] || continue
+        _validate_count=$((_validate_count + 1))
+        # Source each conf in a subshell to avoid bleeding state.
+        # Capture missing-fields list back via a temp file (POSIX has no
+        # easy way to return a string from a subshell).
+        _tmp_missing=$(mktemp)
+        (
+            APP_CODE=""
+            BASE_DOMAIN=""
+            API_TOKEN=""
+            BUNDLE_PASSWORD=""
+            # shellcheck disable=SC1090
+            . "$c"
+            check_required_fields
+            printf '%s' "$_MISSING_FIELDS" > "$_tmp_missing"
+        )
+        _missing=$(cat "$_tmp_missing")
+        rm -f "$_tmp_missing"
+        if [ -n "$_missing" ]; then
+            print_incomplete_config_error "$c" "$_missing"
+            _validate_any_failed=1
+        else
+            echo "OK  $c"
+        fi
+    done
+    if [ "$_validate_count" -eq 0 ]; then
+        echo "auto-certs --validate-config: no *.conf files found in $CONF_DIR" >&2
+        exit 1
+    fi
+    exit $_validate_any_failed
+fi
+
 process_app() {
     _conf="$1"
 
@@ -142,8 +224,9 @@ process_app() {
     # shellcheck disable=SC1090
     . "$_conf"
 
-    if [ -z "$APP_CODE" ] || [ -z "$BASE_DOMAIN" ] || [ -z "$API_TOKEN" ] || [ -z "$BUNDLE_PASSWORD" ]; then
-        echo "config $_conf missing required keys (APP_CODE/BASE_DOMAIN/API_TOKEN/BUNDLE_PASSWORD)" >&2
+    check_required_fields
+    if [ -n "$_MISSING_FIELDS" ]; then
+        print_incomplete_config_error "$_conf" "$_MISSING_FIELDS"
         return 1
     fi
 

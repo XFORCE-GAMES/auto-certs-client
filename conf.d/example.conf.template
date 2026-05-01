@@ -1,0 +1,48 @@
+# auto-certs per-app config — created by install.sh on __GENERATED_AT__.
+#
+# One file per app on this host. The launcher iterates every *.conf in
+# /etc/auto-certs/conf.d/ and processes each app independently — failure
+# for one does not block another.
+#
+# EDIT the EMPTY fields below, save, then verify with:
+#   sudo /opt/auto-certs/launcher.sh --once --app __APP_CODE__
+#
+# Format: KEY=VALUE, no spaces around `=`, value-with-spaces in double
+# quotes. Sourced as shell variables — no metacharacters in values
+# unless you know what you're doing.
+
+APP_CODE=__APP_CODE__
+BASE_DOMAIN=__BASE_DOMAIN__   # override only for delegated-CNAME / custom-domain CPs
+SERVER_URL=__SERVER_URL__
+
+# === REQUIRED — paste these from the per-app chat group ===
+# Until both are filled in, the launcher refuses to call the API and
+# prints a clear "config incomplete" error to stderr and the per-app log.
+API_TOKEN=
+BUNDLE_PASSWORD=
+
+# === Optional (sensible defaults applied if commented out) ===
+
+# Where the cert bundle gets atomic-installed. Default: /etc/auto-certs/<base_domain>/
+# CERT_DIR=/etc/auto-certs/__BASE_DOMAIN__
+
+# What runs after a successful install. Default: /opt/auto-certs/reload.sh.
+# The placeholder reload.sh ships with `exit 1` until you edit it.
+# HOOK_PATH=/opt/auto-certs/reload.sh
+
+# Cap on reload-hook runtime. Default: 60.
+# HOOK_TIMEOUT_SECONDS=60
+
+# Only used when the bundle includes keystore.jks (Java apps).
+# Per CLAUDE.md, the JKS password is dictated by the app developer.
+# JKS_PASSWORD=
+
+# Optional: local TLS self-test targets after the reload hook runs.
+# Format: space-separated "host:port" list. The client connects to each
+# via openssl s_client, fingerprints the served cert, and confirms it
+# matches what we just installed. Mismatch indicates a partial-reload
+# (cert files updated but not all server processes restarted).
+# LOCAL_TLS_TARGETS="127.0.0.1:443 127.0.0.1:8443"
+
+# Optional: where local logs go. Default /var/log/auto-certs/<app>.log
+# LOG_DIR=/var/log/auto-certs
