@@ -1,26 +1,16 @@
 # auto-certs common helpers — POSIX sh.
 # This file is sourced (not executed). Caller has set: AUTO_CERTS_LOG.
 
-# Exit codes (used across the payload).
-RC_OK=0
-RC_GENERIC=1
-RC_AUTH=10
-RC_NETWORK=20
-RC_INTEGRITY=30   # signature verify or hash mismatch
-RC_DECRYPT=31
-RC_EXTRACT=32
-RC_VALIDATION=33  # cert/key pair didn't match, expired, etc.
-RC_RELOAD_HOOK=40
-RC_TLS_SELFTEST=41
-RC_REPORT=50
-
 # Failure-category enum (matches sql/031_client_update_log.sql).
+# Only the categories actually consumed by report.sh / auto_certs.sh are
+# defined; the unused FC_SYNTAX_CHECK + FC_TLS_SELFTEST were dropped 2026-05-02.
+# The 11 unused RC_* exit-code constants were also dropped at the same
+# time — exit codes used by the script are inline integers per POSIX
+# convention.
 FC_NETWORK="network"
 FC_INTEGRITY="integrity"
 FC_EXTRACTION="extraction"
-FC_SYNTAX_CHECK="syntax_check"
 FC_RELOAD_HOOK="reload_hook"
-FC_TLS_SELFTEST="tls_selftest"
 FC_OTHER="other"
 
 # log_<level> "message"

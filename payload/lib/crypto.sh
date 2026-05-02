@@ -24,11 +24,11 @@ verify_signature() {
 
 # Decrypt the DeliveryEnvelope frame produced by Wakool\Cert\DeliveryEnvelope::seal.
 #
-# Wire format (from libs/Wakool/Cert/DeliveryEnvelope.php — keep in sync
-# if the server-side ever bumps the version byte):
+# Wire format v2 (from libs/Wakool/Cert/DeliveryEnvelope.php — keep in
+# sync if the server-side ever bumps the version byte):
 #
 #   [4 B]  magic       "ACEB"
-#   [1 B]  version     0x01
+#   [1 B]  version     0x02
 #   [1 B]  salt_len    16
 #   [N B]  salt
 #   [1 B]  iv_len      16
@@ -36,7 +36,18 @@ verify_signature() {
 #   [4 B]  ct_len      big-endian uint32
 #   [K B]  ciphertext  AES-256-CBC PKCS#7 over plaintext
 #
-# Key derivation: PBKDF2-HMAC-SHA256(password, salt, iter=100_000, dkLen=32).
+# Key derivation v2: HMAC-SHA256(key=password_bytes, msg=salt_bytes) → 32 bytes.
+#
+# Why HMAC-SHA256 single-pass and not PBKDF2 anymore: bundle passwords
+# are machine-generated ≥256-bit secrets (KMS-backed Secrets Manager
+# via Wakool\Cert\BundlePassword); they're already brute-force-
+# infeasible, so PBKDF2 stretching adds no security, and depending on
+# `openssl enc -pbkdf2` (added in 1.1.0) or Perl/Python helpers broke
+# on minimum-install CentOS 6 (no Perl, no Python ≥2.7.8, no openssl
+# ≥1.1). HMAC-SHA256 via `openssl dgst -hmac` is in 1.0.0+ (March
+# 2010), works on every CentOS 5+ host. See
+# docs/research/centos6-compatibility.md for the full argument +
+# empirical canary-centos6 verification.
 #
 # decrypt_envelope <envelope_file> <bundle_password> <plaintext_out>
 # Returns 0 on success; non-zero on any failure (corrupt frame, bad
@@ -63,9 +74,11 @@ decrypt_envelope() {
         return 1
     fi
 
-    # 2. version (1 byte) — accept only 0x01.
+    # 2. version (1 byte) — accept only 0x02 (HMAC-SHA256 KDF; v1 was
+    #    PBKDF2-100k and dropped 2026-05-02 — no production CPs ever
+    #    received a v1 envelope).
     _verbyte=$(head -c 5 "$_enc" 2>/dev/null | tail -c 1 | od -An -tu1 | tr -d ' \n')
-    if [ "$_verbyte" != "1" ]; then
+    if [ "$_verbyte" != "2" ]; then
         log_error "decrypt_envelope: unsupported version ${_verbyte}"
         _cleanup
         return 1
@@ -92,55 +105,27 @@ decrypt_envelope() {
     _ct_offset=$((_ct_len_offset + 4))
     dd if="$_enc" bs=1 count="$_ctlen" skip="$_ct_offset" of="$_tmp/ct" 2>/dev/null
 
-    # 6. Derive AES-256 key via PBKDF2 (100k iter, SHA-256).
+    # 6. Derive AES-256 key — single-pass HMAC-SHA256 (envelope v2).
     #
-    #    PBKDF2 primitives in CLI tools are uneven across our target floor:
-    #      - OpenSSL 3.0+: `openssl kdf -keylen ... PBKDF2` works.
-    #      - OpenSSL 1.1.0–1.1.1: `enc -pbkdf2` is integrated into encrypt;
-    #        no standalone KDF subcommand. Can't extract just the key.
-    #      - OpenSSL 1.0.1e (CentOS 6): no `-pbkdf2` flag at all.
+    #    `openssl dgst -sha256 -hmac KEY` has been in openssl 1.0.0+
+    #    (March 2010), so this works on every CentOS 5+ box. The previous
+    #    PBKDF2 four-gate fallback chain (Perl / Python 3 / Python 2.7.8+
+    #    / openssl 3.0+) is gone — see crypto.sh header docstring for
+    #    the rationale + docs/research/centos6-compatibility.md for the
+    #    full empirical evidence.
     #
-    #    Preference order (most-portable first):
-    #      1. perl + Digest::SHA::hmac_sha256 — works on stock CentOS 6
-    #         (perl 5.10.1, Digest::SHA in core since 5.9.3 / 2006). Perl
-    #         is a hard dep of yum/rpm, so any RPM-based distro has it.
-    #      2. python3 hashlib.pbkdf2_hmac — Ubuntu 14.04+, RHEL 7+.
-    #      3. python2 hashlib.pbkdf2_hmac — Python 2.7.8+ only (NOT 2.6 →
-    #         CentOS 6's stock Python is 2.6 and doesn't have it).
-    #      4. openssl kdf — OpenSSL 3.0+ only.
+    #    LOAD-BEARING: the RAW salt bytes (not their hex representation)
+    #    are the HMAC message. This matches the server-side
+    #    `hash_hmac('sha256', $salt, $password, true)` which feeds the
+    #    raw 16-byte salt. Hashing the hex string instead would produce
+    #    a different key and silently break decryption.
     #
-    #    Perl is FIRST because it's the only path that works on a stock
-    #    CentOS 6 host without ANY install / repo change. Python 2.6's
-    #    `hashlib` lacks `pbkdf2_hmac` (added in 2.7.8); CentOS 6 ships
-    #    2.6 by default. All four paths produce byte-identical output
-    #    (PBKDF2 is deterministic).
-    _salt_hex=$(od -An -tx1 < "$_tmp/salt" | tr -d ' \n')
-    _key_hex=""
-    if command -v perl >/dev/null 2>&1 && perl -MDigest::SHA -e1 2>/dev/null; then
-        _key_hex=$(_pbkdf2_via_perl "$_pwd" "$_salt_hex")
-    elif command -v python3 >/dev/null 2>&1; then
-        _key_hex=$(_pbkdf2_via_python "python3" "$_pwd" "$_salt_hex")
-    elif command -v python2 >/dev/null 2>&1; then
-        _key_hex=$(_pbkdf2_via_python "python2" "$_pwd" "$_salt_hex")
-    elif command -v python >/dev/null 2>&1; then
-        _key_hex=$(_pbkdf2_via_python "python" "$_pwd" "$_salt_hex")
-    elif openssl kdf -help 2>&1 | grep -q -- '-kdfopt'; then
-        # openssl 3.0+ kdf path.
-        _key_hex=$(openssl kdf -keylen 32 \
-                       -kdfopt digest:SHA256 \
-                       -kdfopt pass:"$_pwd" \
-                       -kdfopt hexsalt:"$_salt_hex" \
-                       -kdfopt iter:100000 \
-                       PBKDF2 2>/dev/null | tr -d ':')
-    else
-        log_error "decrypt_envelope: no PBKDF2 primitive available"
-        log_error "  need perl (with Digest::SHA, in core since 5.9.3 / 2006)"
-        log_error "  or python (2.7.8+ / 3.4+) or openssl 3.0+"
-        _cleanup
-        return 1
-    fi
-    if [ -z "$_key_hex" ]; then
-        log_error "decrypt_envelope: PBKDF2 produced no key"
+    #    Output of `openssl dgst -sha256 -hmac KEY < file` is one line
+    #    `HMAC-SHA256(stdin)= <64 hex chars>` — sed strips up to "= ".
+    _key_hex=$(openssl dgst -sha256 -hmac "$_pwd" < "$_tmp/salt" 2>/dev/null \
+        | sed 's/^.*= //')
+    if [ -z "$_key_hex" ] || [ ${#_key_hex} -ne 64 ]; then
+        log_error "decrypt_envelope: HMAC-SHA256 KDF produced unexpected output"
         _cleanup
         return 1
     fi
@@ -201,48 +186,9 @@ cert_fingerprint_sha256() {
         | sed -E "s/^[^=]+=//"
 }
 
-# Internal: PBKDF2 via Python (2.7.8+ / 3.4+). Outputs 64 hex chars (32 bytes).
-# Args: python-binary, password, salt-hex
-_pbkdf2_via_python() {
-    _py="$1"
-    _pwd="$2"
-    _salt_hex="$3"
-    "$_py" -c "
-import sys, hashlib, binascii
-try:
-    salt = binascii.unhexlify(sys.argv[2])
-    key  = hashlib.pbkdf2_hmac('sha256', sys.argv[1].encode('utf-8'), salt, 100000, 32)
-    sys.stdout.write(binascii.hexlify(key).decode('ascii'))
-except Exception as e:
-    sys.stderr.write(str(e) + '\n')
-    sys.exit(1)
-" "$_pwd" "$_salt_hex"
-}
-
-# Internal: PBKDF2 via Perl + Digest::SHA::hmac_sha256.
-# Outputs 64 hex chars (32 bytes). Works on stock CentOS 6 / RHEL 5 — perl
-# is a hard dep of yum/rpm, and Digest::SHA has been in core since
-# Perl 5.9.3 (2006). hmac_sha256 is XS/C-backed, so 100k iterations
-# complete in 1-2 seconds even on CentOS-6-era hardware.
-#
-# We only ever derive 32 bytes of key material, which fits in one SHA-256
-# block — so the outer block-loop is a single iteration (i=1) and we
-# only need the inner HMAC-iteration loop.
-#
-# Args: password, salt-hex
-_pbkdf2_via_perl() {
-    perl -MDigest::SHA=hmac_sha256 -e '
-        my ($pass, $salt_hex) = @ARGV;
-        my $salt = pack("H*", $salt_hex);
-        # PBKDF2 block 1: U_1 = HMAC(P, S || INT(1)).
-        my $U = hmac_sha256($salt . pack("N", 1), $pass);
-        my $T = $U;
-        # T = U_1 ^ U_2 ^ ... ^ U_c, where U_j = HMAC(P, U_{j-1}).
-        for (my $j = 2; $j <= 100000; $j++) {
-            $U = hmac_sha256($U, $pass);
-            $T ^= $U;
-        }
-        # 32-byte output fits in one SHA-256 block; no second block needed.
-        print unpack("H*", $T);
-    ' "$1" "$2"
-}
+# NOTE 2026-05-02: the `_pbkdf2_via_perl` and `_pbkdf2_via_python` helpers
+# were deleted when the envelope KDF moved from PBKDF2-100k to single-pass
+# HMAC-SHA256 (envelope v2). The new KDF is `openssl dgst -sha256 -hmac`
+# inline in `decrypt_envelope` — no external interpreter needed. See
+# docs/research/centos6-compatibility.md §3 for the cryptographic argument
+# and §7 for the migration steps.

@@ -7,29 +7,52 @@
 # shell-mangling. The earlier `_auth="-H Authorization:Bearer\\ $_token"`
 # + unquoted-expansion pattern was buggy — the literal backslash
 # survived and curl received a malformed header name.
+#
+# Curl flag floor: --fail (1996, curl 7.0). NOT --fail-with-body
+# (curl 7.76, April 2021) — the floor fleet has curl 7.19.7 (CentOS 6),
+# 7.29.0 (CentOS 7), 7.47.0 (Ubuntu 16). A regression to a post-7.76
+# flag would silently fail every API call on those hosts; the smoke
+# test `cli/test/client_curl_floor_compat_test.php` is the guard.
 
 # http_get <url> <output_file> [bearer_token] [extra_header_file]
 #
 # Returns 0 on 2xx, non-zero on any other status / network failure.
 # Writes the response body to <output_file>. Writes captured response
 # headers to <output_file>.headers (so caller can read X-Bundle-Hash etc.).
+#
+# extra_header_file (optional, since v0.3.0-rc3): path to a file with
+# one `Header: value` line per row. Blank lines + lines starting with
+# `#` are skipped. Each line is appended to the request as `-H` (curl)
+# or `--header=` (wget). Used by `updater.sh` to send
+# `X-Auto-Certs-Running-Ref` to /launcher_check.
 http_get() {
     _url="$1"
     _out="$2"
     _token="${3:-}"
+    _extra_hdr_file="${4:-}"
     _hdrout="${_out}.headers"
 
     if command -v curl >/dev/null 2>&1; then
         # Build the args list. `set --` resets "$@" to the listed
         # values; subsequent `set -- "$@" ...` appends. Quoting around
         # each "$@" reference is required to preserve whitespace.
-        set -- --silent --show-error --fail-with-body \
+        set -- --silent --show-error --fail \
                --user-agent "auto-certs/$(payload_version 2>/dev/null || echo 0.0.0)" \
                --connect-timeout 10 --max-time 60 \
                --dump-header "$_hdrout" \
                -o "$_out"
         if [ -n "$_token" ]; then
             set -- "$@" -H "Authorization: Bearer $_token"
+        fi
+        if [ -n "$_extra_hdr_file" ] && [ -r "$_extra_hdr_file" ]; then
+            # `|| [ -n "$_hline" ]` handles a trailing-newline-less last line.
+            while IFS= read -r _hline || [ -n "$_hline" ]; do
+                [ -z "$_hline" ] && continue
+                case "$_hline" in
+                    \#*) continue ;;
+                esac
+                set -- "$@" -H "$_hline"
+            done < "$_extra_hdr_file"
         fi
         set -- "$@" "$_url"
         curl "$@"
@@ -45,6 +68,15 @@ http_get() {
                -O "$_out"
         if [ -n "$_token" ]; then
             set -- "$@" --header="Authorization: Bearer $_token"
+        fi
+        if [ -n "$_extra_hdr_file" ] && [ -r "$_extra_hdr_file" ]; then
+            while IFS= read -r _hline || [ -n "$_hline" ]; do
+                [ -z "$_hline" ] && continue
+                case "$_hline" in
+                    \#*) continue ;;
+                esac
+                set -- "$@" --header="$_hline"
+            done < "$_extra_hdr_file"
         fi
         set -- "$@" "$_url"
         wget "$@" 2> "$_hdrout"
@@ -69,16 +101,22 @@ http_header_value() {
         | tr -d '\r'
 }
 
-# http_post_json <url> <payload_file> [bearer_token]
+# http_post_json <url> <payload_file> [bearer_token] [extra_header_file]
 # Returns 0 on 2xx.
+#
+# extra_header_file (optional, since v0.3.0-rc3): same shape as
+# http_get's — one `Header: value` line per row, blank/`#` lines
+# skipped. Forward-looking parity for the `X-Auto-Certs-Running-Ref`
+# pipeline; not yet wired up by /report or /self_check_report callers.
 http_post_json() {
     _url="$1"
     _payload="$2"
     _token="${3:-}"
+    _extra_hdr_file="${4:-}"
     _resp="${_payload}.resp"
 
     if command -v curl >/dev/null 2>&1; then
-        set -- --silent --show-error --fail-with-body \
+        set -- --silent --show-error --fail \
                --user-agent "auto-certs/$(payload_version 2>/dev/null || echo 0.0.0)" \
                --connect-timeout 10 --max-time 60 \
                -H "Content-Type: application/json" \
@@ -86,6 +124,15 @@ http_post_json() {
                -o "$_resp"
         if [ -n "$_token" ]; then
             set -- "$@" -H "Authorization: Bearer $_token"
+        fi
+        if [ -n "$_extra_hdr_file" ] && [ -r "$_extra_hdr_file" ]; then
+            while IFS= read -r _hline || [ -n "$_hline" ]; do
+                [ -z "$_hline" ] && continue
+                case "$_hline" in
+                    \#*) continue ;;
+                esac
+                set -- "$@" -H "$_hline"
+            done < "$_extra_hdr_file"
         fi
         set -- "$@" "$_url"
         curl "$@"
@@ -100,6 +147,15 @@ http_post_json() {
                -O "$_resp"
         if [ -n "$_token" ]; then
             set -- "$@" --header="Authorization: Bearer $_token"
+        fi
+        if [ -n "$_extra_hdr_file" ] && [ -r "$_extra_hdr_file" ]; then
+            while IFS= read -r _hline || [ -n "$_hline" ]; do
+                [ -z "$_hline" ] && continue
+                case "$_hline" in
+                    \#*) continue ;;
+                esac
+                set -- "$@" --header="$_hline"
+            done < "$_extra_hdr_file"
         fi
         set -- "$@" "$_url"
         wget "$@"

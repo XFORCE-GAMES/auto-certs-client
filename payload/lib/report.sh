@@ -200,3 +200,108 @@ drain_report_queue() {
         fi
     done
 }
+
+# Build a /api/v1/self_check_report payload (Phase 6 Step 4 / B3).
+#
+# Distinct from build_report_payload because the natural key + endpoint
+# semantics are different: self-check is per-(machine, launcher-version-
+# flip), not per-cert-update-attempt.
+#
+# build_self_check_payload <outfile> <result> <new_version>
+#                          <previous_version> <failure_reason> <env_fp_json>
+#
+# Required: result (pass|fail), new_version (vX.Y.Z[-rcN]).
+# Optional: previous_version, failure_reason, env_fp_json.
+#
+# Output is a JSON object conforming to SelfCheckPayloadValidator's
+# ALLOWED_TOP_LEVEL keys.
+build_self_check_payload() {
+    _outfile="$1"
+    _result="$2"
+    _new_version="$3"
+    _previous_version="${4:-}"
+    _failure_reason="${5:-}"
+    _env_fp_json="${6:-}"
+
+    _machine_uuid=$(cat /etc/auto-certs/machine_id 2>/dev/null || echo "")
+    _reported_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    _launcher_version=$(payload_version)
+
+    _reason_esc=$(printf "%s" "$_failure_reason" | redact \
+        | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[[:cntrl:]]//g')
+
+    {
+        printf '{'
+        printf '"phase":"self_check",'
+        printf '"result":"%s",' "$_result"
+        printf '"machine_uuid":"%s",' "$_machine_uuid"
+        printf '"new_version":"%s",' "$_new_version"
+        printf '"reported_at":"%s",' "$_reported_at"
+        if [ -n "$_previous_version" ]; then
+            printf '"previous_version":"%s",' "$_previous_version"
+        fi
+        if [ -n "$_failure_reason" ]; then
+            printf '"failure_reason":"%s",' "$_reason_esc"
+        fi
+        if [ -n "$_env_fp_json" ]; then
+            printf '"env_fingerprint":%s,' "$_env_fp_json"
+        fi
+        printf '"launcher_version":"%s"' "$_launcher_version"
+        printf '}'
+    } > "$_outfile"
+}
+
+# POST a self-check report. Same retry + queue semantics as send_report.
+# On persistent failure, queues to <queue_dir>/sc-<ts>-<pid>-<rand>.json.
+#
+# send_self_check_report <payload_file> <queue_dir>
+send_self_check_report() {
+    _payload="$1"
+    _queue="$2"
+    _url="${SERVER_URL:-https://auto-certs.xforce-games.com}/api/v1/self_check_report"
+
+    if http_post_json "$_url" "$_payload" "$API_TOKEN"; then
+        log_info "self_check_report sent"
+        return 0
+    fi
+    sleep 2
+    if http_post_json "$_url" "$_payload" "$API_TOKEN"; then
+        log_info "self_check_report sent (retry)"
+        return 0
+    fi
+    # Queue. Distinct prefix `sc-` so drain_self_check_queue can
+    # filter — drain_report_queue's `*.json` glob would otherwise
+    # try to POST self-check payloads to /api/v1/report and 422.
+    mkdir -p "$_queue" 2>/dev/null || true
+    _ts=$(date +%s)
+    _rand=$(awk 'BEGIN{srand(); printf "%05d\n", int(rand()*100000)}' 2>/dev/null || echo "00000")
+    _qfile="$_queue/sc-${_ts}-$$-${_rand}.json"
+    if cp "$_payload" "$_qfile" 2>/dev/null; then
+        log_warn "self_check_report send failed twice; queued at $_qfile"
+    else
+        log_error "self_check_report send failed AND queue write failed"
+    fi
+    return 1
+}
+
+# Drain the self-check queue (sc-*.json) into /api/v1/self_check_report.
+# Same shape as drain_report_queue but on a different endpoint + glob.
+drain_self_check_queue() {
+    _queue="$1"
+    if [ ! -d "$_queue" ]; then
+        return 0
+    fi
+    _url="${SERVER_URL:-https://auto-certs.xforce-games.com}/api/v1/self_check_report"
+    for _qfile in "$_queue"/sc-*.json; do
+        if [ ! -r "$_qfile" ]; then
+            continue
+        fi
+        if http_post_json "$_url" "$_qfile" "$API_TOKEN"; then
+            rm -f "$_qfile" 2>/dev/null || true
+            log_info "queued self_check_report $_qfile drained"
+        else
+            log_warn "queued self_check_report $_qfile still failing"
+            break
+        fi
+    done
+}

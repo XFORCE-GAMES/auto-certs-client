@@ -262,9 +262,31 @@ process_app() {
     phase_event "check_started"
 
     # Call /api/v1/check.
+    #
+    # We send X-Auto-Certs-Running-Ref so the server-side
+    # ApiController::check() can populate launcher_assignments via the
+    # heartbeat-tube path (/check is the per-tick heartbeat anchor
+    # for every CP machine; without the header the worker skips the
+    # launcher_assignments INSERT branch and the rollout state machine
+    # never sees the machine). Header value is the canonical git-tag
+    # form maintained by updater.sh on every flip; fall back to the
+    # bare-semver VERSION prefixed with `v` for pre-Phase-6 layouts
+    # without a .launcher_target file. Header-sending added in
+    # v0.3.0-rc4.
+    _install_root="${AUTO_CERTS_INSTALL_ROOT:-/opt/auto-certs}"
+    _running_ref=""
+    if [ -r "${_install_root}/.launcher_target" ]; then
+        _running_ref=$(head -n 1 "${_install_root}/.launcher_target" | tr -d '\r\n')
+    fi
+    if [ -z "$_running_ref" ]; then
+        _running_ref="v$(payload_version 2>/dev/null || echo 0.0.0)"
+    fi
+    _hdr_file=$(mktemp)
+    echo "X-Auto-Certs-Running-Ref: $_running_ref" > "$_hdr_file"
+
     _tmp=$(mktemp)
     _check_url="${SERVER_URL}/api/v1/check?machine_uuid=$(cat "$MACHINE_ID_PATH")&hash=${_current_hash}"
-    if ! http_get "$_check_url" "$_tmp" "$API_TOKEN"; then
+    if ! http_get "$_check_url" "$_tmp" "$API_TOKEN" "$_hdr_file"; then
         log_error "/check failed (network or HTTP error)"
         phase_event "check_failed" "network or HTTP error"
         _payload_file=$(mktemp)
@@ -272,9 +294,10 @@ process_app() {
             "${_current_hash:-0000000000000000000000000000000000000000000000000000000000000000}" \
             "false" "/check request failed" "$FC_NETWORK" "" ""
         send_report "$_payload_file" "$QUEUE_DIR" || true
-        rm -f "$_tmp" "${_tmp}.headers" "$_payload_file" "${_payload_file}.resp" 2>/dev/null || true
+        rm -f "$_tmp" "${_tmp}.headers" "$_payload_file" "${_payload_file}.resp" "$_hdr_file" 2>/dev/null || true
         return 1
     fi
+    rm -f "$_hdr_file" 2>/dev/null || true
     phase_event "check_completed"
 
     _resp=$(cat "$_tmp" 2>/dev/null || echo "{}")
@@ -517,9 +540,21 @@ emit_failure() {
     rm -f "$_payload_file" "${_payload_file}.resp" 2>/dev/null || true
 }
 
-# ---- self-check mode (Phase 4 Step 8 / Phase 6 prep) -------------------
+# ---- self-check mode (Phase 4 Step 8 / Phase 6 Step 4) -----------------
+#
+# Runs validation checks; reports result to /api/v1/self_check_report
+# (NOT /api/v1/report — different natural key, different endpoint per
+# Phase 6 plan §4 Step 1 / B3). On fail, exits non-zero so updater.sh
+# (the caller) knows to revert to the previous payload.
+#
+# Note: run_self_check exits 0 OR 1; the OUTPUT is a side effect — a
+# POST to /self_check_report. updater.sh interprets the exit code; the
+# server interprets the POSTed result field.
 run_self_check() {
-    log_info "$APP_CODE: self-check"
+    _new_version=$(payload_version)
+    _previous_version=$(head -n 1 "/opt/auto-certs/.previous_target" 2>/dev/null | tr -d '\r\n')
+    log_info "$APP_CODE: self-check (new_version=${_new_version})"
+
     _failures=""
     if [ ! -d "$CERT_DIR" ]; then
         _failures="${_failures} cert_dir_missing"
@@ -538,18 +573,28 @@ run_self_check() {
     if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
         _failures="${_failures} no_sha256"
     fi
+
+    _env_fp=$(build_environment_json)
+
     if [ -n "$_failures" ]; then
         log_error "self-check FAIL:$_failures"
-        # Report self-check fail.
+        # POST fail report FIRST, THEN return non-zero so updater.sh
+        # knows to revert.
         _payload_file=$(mktemp)
-        build_report_payload "$_payload_file" \
-            "0000000000000000000000000000000000000000000000000000000000000000" \
-            "false" "self_check_fail:$_failures" "$FC_OTHER" "" ""
-        send_report "$_payload_file" "$QUEUE_DIR" || true
+        build_self_check_payload "$_payload_file" "fail" "$_new_version" \
+            "$_previous_version" "self_check_failures:$_failures" "$_env_fp"
+        send_self_check_report "$_payload_file" "$QUEUE_DIR" || true
         rm -f "$_payload_file" "${_payload_file}.resp" 2>/dev/null || true
         return 1
     fi
+
     log_info "self-check OK"
+    # POST pass report.
+    _payload_file=$(mktemp)
+    build_self_check_payload "$_payload_file" "pass" "$_new_version" \
+        "$_previous_version" "" "$_env_fp"
+    send_self_check_report "$_payload_file" "$QUEUE_DIR" || true
+    rm -f "$_payload_file" "${_payload_file}.resp" 2>/dev/null || true
     return 0
 }
 
