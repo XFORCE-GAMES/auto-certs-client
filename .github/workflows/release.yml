@@ -121,17 +121,65 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
 
+      - name: RSA-4096 sign tarball (Phase 6 client-trust path)
+        # Phase 6 Step 3 prereq — every CP host's `updater.sh` verifies
+        # release tarballs against the pinned `payload/lib/server-pubkey.pem`
+        # using `crypto.sh::verify_signature`. Same primitive
+        # `App\Cert\DeliveryEnvelope::seal` uses for cert-bundle signing.
+        #
+        # Gated on the `RELEASE_SIGNING_KEY` repo secret being set, so
+        # this workflow stays green when the secret hasn't been
+        # provisioned yet (deferred-prereq pattern). When the operator
+        # adds the secret, the next tag push picks it up automatically.
+        #
+        # The secret value is the PEM-encoded private key from the
+        # AWS Secrets Manager entry `auto-certs/release-signing-key`
+        # (the same key DeliveryEnvelope::seal uses). Filename is
+        # `<tarball>.release.sig` — distinct from `.sig` which is
+        # cosign's keyless signature.
+        if: ${{ env.RELEASE_SIGNING_KEY != '' }}
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tarball="${{ steps.build.outputs.tarball }}"
+          # Mode-600 temp file — same discipline as DeliveryEnvelope::seal.
+          keyfile=$(mktemp)
+          chmod 600 "$keyfile"
+          # `printf '%s'` (not `echo`) preserves PEM-base64 lines
+          # verbatim — `echo` could mangle backslashes if any survive
+          # in the secret value.
+          printf '%s' "$RELEASE_SIGNING_KEY" > "$keyfile"
+          openssl dgst -sha256 -sign "$keyfile" \
+            -out "${tarball}.release.sig" "$tarball"
+          # Self-verify before declaring success — a mismatched key would
+          # produce an unverifiable sig and waste an artifact slot.
+          openssl rsa -in "$keyfile" -pubout -out /tmp/release-pubkey.pem 2>/dev/null
+          openssl dgst -sha256 -verify /tmp/release-pubkey.pem \
+            -signature "${tarball}.release.sig" "$tarball"
+          # Wipe key from disk before continuing.
+          shred -u "$keyfile" /tmp/release-pubkey.pem 2>/dev/null \
+            || rm -f "$keyfile" /tmp/release-pubkey.pem
+          echo "Signed: ${tarball}.release.sig ($(stat -c%s "${tarball}.release.sig") bytes)"
+
       - name: Compute checksums
         shell: bash
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
-          sha256sum \
-            "auto-certs-client-${version}.tar.gz" \
-            "auto-certs-client-${version}.tar.gz.sig" \
-            "auto-certs-client-${version}.tar.gz.crt" \
-            "auto-certs-client-${version}.spdx.json" \
-            > SHA256SUMS
+          # Always-present artifacts.
+          files=(
+            "auto-certs-client-${version}.tar.gz"
+            "auto-certs-client-${version}.tar.gz.sig"
+            "auto-certs-client-${version}.tar.gz.crt"
+            "auto-certs-client-${version}.spdx.json"
+          )
+          # Conditional: RSA detached sig if the prior step ran (secret set).
+          if [ -f "auto-certs-client-${version}.tar.gz.release.sig" ]; then
+            files+=("auto-certs-client-${version}.tar.gz.release.sig")
+          fi
+          sha256sum "${files[@]}" > SHA256SUMS
           cat SHA256SUMS
 
       - name: Generate SLSA build-provenance attestation
@@ -173,8 +221,9 @@ jobs:
             ## Artifacts
 
             - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz` — release tarball
-            - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.sig` — cosign signature
+            - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.sig` — cosign signature (out-of-band MIS audit)
             - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.crt` — cosign certificate
+            - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.release.sig` — RSA-4096 detached signature (Phase 6 client-trust path; only present when `RELEASE_SIGNING_KEY` repo secret is set)
             - `auto-certs-client-${{ steps.version.outputs.version }}.spdx.json` — SBOM (SPDX 2.3)
             - `SHA256SUMS` — checksums for every artifact
             - SLSA build-provenance attestation — see the **Attestations** section
@@ -182,5 +231,6 @@ jobs:
             auto-certs-client-${{ steps.version.outputs.version }}.tar.gz
             auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.sig
             auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.crt
+            auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.release.sig
             auto-certs-client-${{ steps.version.outputs.version }}.spdx.json
             SHA256SUMS
