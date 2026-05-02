@@ -36,7 +36,14 @@ http_get() {
         # Build the args list. `set --` resets "$@" to the listed
         # values; subsequent `set -- "$@" ...` appends. Quoting around
         # each "$@" reference is required to preserve whitespace.
-        set -- --silent --show-error --fail \
+        #
+        # --location follows 30x redirects — load-bearing for GitHub
+        # release downloads which always 302 from
+        # github.com/.../releases/download/... to
+        # objects.githubusercontent.com/.../. Without it the body never
+        # lands on disk and verify_signature trips "missing inputs".
+        # wget follows redirects by default; only curl needs the flag.
+        set -- --silent --show-error --fail --location \
                --user-agent "auto-certs/$(payload_version 2>/dev/null || echo 0.0.0)" \
                --connect-timeout 10 --max-time 60 \
                --dump-header "$_hdrout" \
@@ -165,9 +172,22 @@ http_post_json() {
     return 1
 }
 
-# Read VERSION from the payload directory (relative to this lib dir).
+# Read VERSION from the payload directory.
+#
+# `$0` in shell is the calling script's path (sourcing this lib does NOT
+# change $0). The caller is `auto_certs.sh` which lives at
+# `<payload_dir>/auto_certs.sh`, so one `dirname` lands on the payload
+# directory where VERSION is sibling. Two dirname's (the original code)
+# would skip past the payload dir to its parent — a real bug that
+# surfaced during Phase 6 first-rollout: payload_version() returned
+# "0.0.0" because it was reading a non-existent /opt/auto-certs/VERSION
+# instead of /opt/auto-certs/current/VERSION.
+#
+# Fallback override `AUTO_CERTS_PAYLOAD_DIR` lets edge invocations point
+# at an explicit dir (e.g. updater.sh post-flip when $0 isn't auto_certs.sh).
 payload_version() {
-    _verfile="$(dirname "$(dirname "$0")")/VERSION"
+    _payload_dir="${AUTO_CERTS_PAYLOAD_DIR:-$(dirname "$0")}"
+    _verfile="${_payload_dir}/VERSION"
     if [ -r "$_verfile" ]; then
         head -n 1 "$_verfile"
     else

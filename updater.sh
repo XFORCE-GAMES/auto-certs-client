@@ -116,9 +116,21 @@ mkdir -p "$PAYLOAD_NEW"
 if ! tar -xzf "$TARBALL" -C "$PAYLOAD_NEW" 2>/dev/null; then
     log_error "tar extract failed"; rm -rf "$STAGING" "$PAYLOAD_NEW"; exit 0
 fi
-# Bubble up if archive is wrapped in a single top-level dir.
+# Bubble up if the archive is wrapped. The release.yml tarball wraps
+# everything in `auto-certs-client-<ver>/` AND puts `auto_certs.sh`
+# under `auto-certs-client-<ver>/payload/`, so the canonical depth
+# from PAYLOAD_NEW is 3. -maxdepth 4 tolerates:
+#   (a) flat shape (PAYLOAD_NEW/auto_certs.sh) — depth 1
+#   (b) wrapped only (PAYLOAD_NEW/<top>/auto_certs.sh) — depth 2
+#   (c) wrapped + payload/ (PAYLOAD_NEW/<top>/payload/auto_certs.sh) — depth 3
+#       — this is the actual release.yml shape today.
+# After the move, the leftover sibling files in <top>/ (README, LICENSE,
+# install.sh, launcher.sh, updater.sh, conf.d/) sit unused at
+# PAYLOAD_NEW/<top>/ — harmless clutter; launcher.sh is treated as
+# immutable post-install per Phase 6 design and updater.sh manages
+# itself via the install root, not the payload subtree.
 if [ ! -f "${PAYLOAD_NEW}/auto_certs.sh" ]; then
-    INNER=$(find "$PAYLOAD_NEW" -maxdepth 2 -name auto_certs.sh -print -quit 2>/dev/null)
+    INNER=$(find "$PAYLOAD_NEW" -maxdepth 4 -name auto_certs.sh -print -quit 2>/dev/null)
     if [ -n "$INNER" ]; then
         INNER_DIR=$(dirname "$INNER")
         mv "$INNER_DIR"/* "$PAYLOAD_NEW/" 2>/dev/null || true

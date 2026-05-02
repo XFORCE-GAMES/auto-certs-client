@@ -551,8 +551,26 @@ emit_failure() {
 # POST to /self_check_report. updater.sh interprets the exit code; the
 # server interprets the POSTed result field.
 run_self_check() {
-    _new_version=$(payload_version)
-    _previous_version=$(head -n 1 "/opt/auto-certs/.previous_target" 2>/dev/null | tr -d '\r\n')
+    # new_version MUST match the rollout's `target_ref` shape (git-tag
+    # form, e.g. `v0.3.0-rc4`) for the server-side gate-1 self-check-
+    # pass JOIN to fire. The .launcher_target file written by updater.sh
+    # post-flip carries the canonical tag form (`v0.3.0-rc4`); fall back
+    # to `v$(payload_version)` for paths where .launcher_target hasn't
+    # been written (pre-Phase-6 layout, fresh install). Bare-semver from
+    # payload/VERSION (the prior code) didn't match tag-form target_ref
+    # — surfaced during Phase 6 first-rollout: self-check reports landed
+    # but launcher_self_checks.new_version='0.3.0-rc4' didn't equal
+    # launcher_rollouts.target_ref='v0.3.0-rc4', so the S5-2 UPDATE
+    # filter excluded the row + the rollout never paused on fail.
+    _install_root="${AUTO_CERTS_INSTALL_ROOT:-/opt/auto-certs}"
+    _new_version=""
+    if [ -r "${_install_root}/.launcher_target" ]; then
+        _new_version=$(head -n 1 "${_install_root}/.launcher_target" | tr -d '\r\n')
+    fi
+    if [ -z "$_new_version" ]; then
+        _new_version="v$(payload_version 2>/dev/null || echo 0.0.0)"
+    fi
+    _previous_version=$(head -n 1 "${_install_root}/.previous_target" 2>/dev/null | tr -d '\r\n')
     log_info "$APP_CODE: self-check (new_version=${_new_version})"
 
     _failures=""
