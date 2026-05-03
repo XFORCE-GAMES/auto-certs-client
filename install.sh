@@ -130,12 +130,107 @@ for _d in "$INSTALL_ROOT" "$ETC_ROOT/conf.d" "$LOG_ROOT" "$LIB_ROOT/queue"; do
 done
 
 # ---- copy / fetch source --------------------------------------------------
-# In v1 we ship from a local SOURCE_DIR (test path); the public-curl-pipe
-# install fetches a tarball from a release URL once Phase 7 GitHub
-# migration is done. For now SOURCE_DIR is required.
+# Two paths:
+#   (a) --source-dir <path> given (testing / re-install from local tree).
+#   (b) Auto-fetch from GitHub Releases (the curl|sh one-liner path).
+#
+# Auto-fetch flow (path b):
+#   1. Download SHA256SUMS from /releases/${REL}/download/SHA256SUMS
+#      where REL defaults to "latest" (or AUTO_CERTS_INSTALL_RELEASE for
+#      pinning). The /latest/download/<asset> URL pattern transparently
+#      redirects to whichever tag is the most recent published release.
+#   2. Parse the tarball entry from SHA256SUMS (line ending in `.tar.gz`).
+#   3. Download the tarball.
+#   4. SHA-256 verify against the value from SHA256SUMS. The trust anchor
+#      is the GitHub TLS chain — same shape as `rustup`, `nvm`, `helm`,
+#      etc. SHA-256 verification is defense-in-depth that catches
+#      mid-transfer corruption + signed-but-misuploaded artifact mixups.
+#   5. Extract to a temp dir; set SOURCE_DIR to that.
+#
+# CentOS 6 / old-trust-store hosts:
+#   GitHub TLS doesn't validate against pre-2018 ca-certificates. For that
+#   case set AUTO_CERTS_INSECURE_BOOTSTRAP=1 — install.sh will use
+#   `curl --insecure` / `wget --no-check-certificate`. In that mode the
+#   SHA-256 check is the SOLE trust anchor; the CP MIS MUST verify the
+#   expected hash out-of-band against a trusted channel (e.g. the GitHub
+#   release page viewed from a modern browser, or a hash communicated
+#   through the per-app chat group). See cp-onboarding-flow.md §"Special
+#   cases — CentOS 6 first-install bootstrap".
+#
+# Override repo / release for testing:
+#   AUTO_CERTS_INSTALL_REPO    default: XFORCE-GAMES/auto-certs-client
+#   AUTO_CERTS_INSTALL_RELEASE default: latest  (or a tag like v0.3.0-rc9)
 if [ -z "$SOURCE_DIR" ]; then
-    echo "install: --source-dir required (Phase 7 will add GitHub fetch)" >&2
-    exit 2
+    BOOT_TMP=$(mktemp -d)
+    # Cleanup on any exit path. Quoted-single-quote inside the trap so the
+    # path expands now (when BOOT_TMP is set), not later.
+    trap "rm -rf '$BOOT_TMP'" EXIT INT TERM
+    GH_REPO="${AUTO_CERTS_INSTALL_REPO:-XFORCE-GAMES/auto-certs-client}"
+    INS_FLAG=""; WGET_INS=""
+    if [ "${AUTO_CERTS_INSECURE_BOOTSTRAP:-0}" = "1" ]; then
+        INS_FLAG="--insecure"; WGET_INS="--no-check-certificate"
+        echo "auto-certs install: WARNING — bootstrap fetches use --insecure (AUTO_CERTS_INSECURE_BOOTSTRAP=1)." >&2
+        echo "  SHA-256 check is the SOLE trust anchor; expected-hash MUST come from a trusted channel." >&2
+    fi
+    _ac_fetch() {  # _ac_fetch <url> <out>
+        if command -v curl >/dev/null 2>&1; then
+            # shellcheck disable=SC2086  # INS_FLAG must word-split when set
+            curl -sSL --fail $INS_FLAG "$1" -o "$2"
+        else
+            # shellcheck disable=SC2086  # WGET_INS must word-split when set
+            wget $WGET_INS -q -O "$2" "$1"
+        fi
+    }
+    # Resolve which release to install. Default: the most recent release
+    # (including pre-releases — pre-1.0 every tag is `v0.3.0-rcN` so
+    # `/releases/latest/download/` doesn't resolve, since GitHub's "latest"
+    # excludes prereleases). Use the GitHub API which returns
+    # all releases newest-first; the first `"tag_name"` match is the most
+    # recent. AUTO_CERTS_INSTALL_RELEASE pins to a specific tag for
+    # reproducible installs and bypasses the API call.
+    GH_REL="${AUTO_CERTS_INSTALL_RELEASE:-}"
+    if [ -z "$GH_REL" ]; then
+        echo "auto-certs install: discovering latest release via GitHub API..."
+        _ac_fetch "https://api.github.com/repos/${GH_REPO}/releases" "${BOOT_TMP}/releases.json" || {
+            echo "auto-certs install: failed to query GitHub API for releases" >&2
+            echo "  fix: pin AUTO_CERTS_INSTALL_RELEASE=<tag> (e.g. v0.3.0-rc9) and re-run" >&2
+            exit 1
+        }
+        GH_REL=$(grep -m1 '"tag_name"' "${BOOT_TMP}/releases.json" \
+            | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+        [ -n "$GH_REL" ] || { echo "auto-certs install: could not parse latest tag from API response" >&2; exit 1; }
+        echo "auto-certs install: latest release: ${GH_REL}"
+    fi
+    GH_BASE="https://github.com/${GH_REPO}/releases/download/${GH_REL}"
+    echo "auto-certs install: fetching SHA256SUMS from ${GH_BASE}/SHA256SUMS"
+    _ac_fetch "${GH_BASE}/SHA256SUMS" "${BOOT_TMP}/SHA256SUMS" || {
+        echo "auto-certs install: failed to fetch SHA256SUMS" >&2; exit 1
+    }
+    LINE=$(grep -E '  auto-certs-client-v?[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)[0-9]+)?\.tar\.gz$' "${BOOT_TMP}/SHA256SUMS" | head -n 1)
+    [ -n "$LINE" ] || { echo "auto-certs install: no tarball entry found in SHA256SUMS" >&2; exit 1; }
+    EXP_HASH=$(printf '%s' "$LINE" | awk '{print $1}')
+    TGZ_NAME=$(printf '%s' "$LINE" | awk '{print $2}')
+    echo "auto-certs install: bootstrapping from ${TGZ_NAME} (expected SHA-256 ${EXP_HASH})"
+    _ac_fetch "${GH_BASE}/${TGZ_NAME}" "${BOOT_TMP}/${TGZ_NAME}" || {
+        echo "auto-certs install: failed to fetch ${TGZ_NAME}" >&2; exit 1
+    }
+    if command -v sha256sum >/dev/null 2>&1; then
+        echo "${EXP_HASH}  ${BOOT_TMP}/${TGZ_NAME}" | sha256sum -c - >/dev/null \
+            || { echo "auto-certs install: tarball SHA-256 mismatch — refusing to install" >&2; exit 1; }
+    elif command -v shasum >/dev/null 2>&1; then
+        ACT=$(shasum -a 256 "${BOOT_TMP}/${TGZ_NAME}" | awk '{print $1}')
+        [ "$ACT" = "$EXP_HASH" ] \
+            || { echo "auto-certs install: tarball SHA-256 mismatch — refusing to install" >&2; exit 1; }
+    else
+        # openssl is in the preflight list above so this branch always works.
+        ACT=$(openssl dgst -sha256 "${BOOT_TMP}/${TGZ_NAME}" | awk '{print $NF}')
+        [ "$ACT" = "$EXP_HASH" ] \
+            || { echo "auto-certs install: tarball SHA-256 mismatch — refusing to install" >&2; exit 1; }
+    fi
+    echo "auto-certs install: SHA-256 verified"
+    tar -xzf "${BOOT_TMP}/${TGZ_NAME}" -C "$BOOT_TMP"
+    SOURCE_DIR="${BOOT_TMP}/${TGZ_NAME%.tar.gz}"
+    [ -d "$SOURCE_DIR" ] || { echo "auto-certs install: extracted dir missing: $SOURCE_DIR" >&2; exit 1; }
 fi
 if [ ! -d "$SOURCE_DIR/payload" ] || [ ! -r "$SOURCE_DIR/launcher.sh" ]; then
     echo "install: --source-dir does not look like an auto-certs client tree" >&2

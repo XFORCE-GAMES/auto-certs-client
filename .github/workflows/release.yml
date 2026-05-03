@@ -168,12 +168,18 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
-          # Always-present artifacts.
+          # install.sh is a top-level repo file that the release workflow
+          # also uploads as a release asset (so the documented one-liner
+          # `curl ... /releases/download/<tag>/install.sh | sudo sh -s -- --app <code>`
+          # actually resolves). Including it in SHA256SUMS lets operators
+          # verify the bootstrap script independently of the tarball it
+          # then auto-fetches.
           files=(
             "auto-certs-client-${version}.tar.gz"
             "auto-certs-client-${version}.tar.gz.sig"
             "auto-certs-client-${version}.tar.gz.crt"
             "auto-certs-client-${version}.spdx.json"
+            "install.sh"
           )
           # Conditional: RSA detached sig if the prior step ran (secret set).
           if [ -f "auto-certs-client-${version}.tar.gz.release.sig" ]; then
@@ -225,7 +231,8 @@ jobs:
             - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.crt` — cosign certificate
             - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.release.sig` — RSA-4096 detached signature (Phase 6 client-trust path; only present when `RELEASE_SIGNING_KEY` repo secret is set)
             - `auto-certs-client-${{ steps.version.outputs.version }}.spdx.json` — SBOM (SPDX 2.3)
-            - `SHA256SUMS` — checksums for every artifact
+            - `install.sh` — bootstrap installer (the curl|sh entry point; auto-fetches the tarball, SHA-256-verifies, and runs)
+            - `SHA256SUMS` — checksums for every artifact (including `install.sh`)
             - SLSA build-provenance attestation — see the **Attestations** section
           files: |
             auto-certs-client-${{ steps.version.outputs.version }}.tar.gz
@@ -233,4 +240,5 @@ jobs:
             auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.crt
             auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.release.sig
             auto-certs-client-${{ steps.version.outputs.version }}.spdx.json
+            install.sh
             SHA256SUMS

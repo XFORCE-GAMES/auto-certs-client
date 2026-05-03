@@ -89,13 +89,20 @@ jobs:
           install_loc=$(wc -l < install.sh)
           echo "launcher.sh                         : $launcher_loc lines (cap: 80)"
           echo "payload/auto_certs.sh + lib/*.sh    : $payload_loc lines (cap: 1600)"
-          echo "install.sh                          : $install_loc lines (cap: 400)"
+          echo "install.sh                          : $install_loc lines (cap: 500)"
           fail=0
           [ "$launcher_loc" -le 80 ] || { echo "::error::launcher.sh exceeds cap"; fail=1; }
           # Cap bumped 1500→1600 in v0.3.0-rc7 to accommodate NEW-39 fix
           # (~28 lines for AUTO_CERTS_CACERT wiring in http.sh + auto_certs.sh).
-          # Headroom is intentional — security fixes shouldn't be gated by a
-          # cosmetic LOC cap. Bump again if future fixes legitimately push past.
+          # install.sh cap bumped 400→500 in v0.3.0-rc9 to accommodate the
+          # auto-fetch implementation (CHANGELOG §47): when --source-dir
+          # is not given, install.sh discovers the latest release via the
+          # GitHub API, fetches SHA256SUMS + tarball, SHA-256-verifies,
+          # extracts, and proceeds. Replaces the "Phase 7 will add GitHub
+          # fetch" stub. ~80 lines for the full bootstrap path.
+          # Headroom is intentional — security fixes + functional features
+          # shouldn't be gated by a cosmetic LOC cap. Bump again if future
+          # fixes legitimately push past.
           [ "$payload_loc"  -le 1600 ] || { echo "::error::payload total exceeds cap"; fail=1; }
-          [ "$install_loc"  -le 400 ] || { echo "::error::install.sh exceeds cap"; fail=1; }
+          [ "$install_loc"  -le 500 ] || { echo "::error::install.sh exceeds cap"; fail=1; }
           exit "$fail"
