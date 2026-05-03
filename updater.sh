@@ -56,8 +56,23 @@ CURRENT_TARGET=$(head -n 1 "$LAUNCHER_TARGET_FILE" 2>/dev/null | tr -d '\r\n')
 # before any updater tick): read VERSION from the active payload tree.
 # Note: payload_version() in http.sh derives from $0 — that's auto_certs
 # .sh's dirname, not updater.sh's; we need the symlink target's VERSION.
+#
+# NEW-28 (CHANGELOG §36.7 #7): the on-disk VERSION file contains BARE
+# semver ("0.3.0-rc5") — that's what client/payload/VERSION ships and
+# what release.yml puts in the tarball. But rollouts use TAG form
+# ("v0.3.0-rc5") in `launcher_rollouts.target_ref`, in
+# `launcher_assignments.assigned_ref`, and on the line-93 equality check
+# below (`[ "$ASSIGNED" = "$CURRENT_TARGET" ]`). If we leave CURRENT_TARGET
+# bare on first install, that comparison always trips a needless re-flip
+# AND `launcher_assignments` rows for first-sight tuples land with
+# inconsistent `assigned_ref` shapes (some bare, some tag). Normalize to
+# tag form here so the rest of the script sees one canonical shape.
 if [ -z "$CURRENT_TARGET" ]; then
     CURRENT_TARGET=$(head -n 1 "${INSTALL_ROOT}/current/VERSION" 2>/dev/null | tr -d '\r\n')
+    case "$CURRENT_TARGET" in
+        v*|"") ;;
+        *) CURRENT_TARGET="v${CURRENT_TARGET}" ;;
+    esac
     [ -z "$CURRENT_TARGET" ] && CURRENT_TARGET="v0.0.0"
 fi
 

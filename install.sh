@@ -142,8 +142,26 @@ if [ ! -d "$SOURCE_DIR/payload" ] || [ ! -r "$SOURCE_DIR/launcher.sh" ]; then
     exit 2
 fi
 
+# VERSION file ships BARE semver ("0.3.0-rc5"); we use TAG form ("v0.3.0-rc5")
+# everywhere on disk + on the wire so that:
+#   - .launcher_target matches launcher_rollouts.target_ref shape (TAG)
+#   - payload-vX.Y.Z dir names match what updater.sh creates on a flip
+#     (so auto-revert can find the previous payload reliably)
+#   - X-Auto-Certs-Running-Ref header sent by updater.sh is TAG form
+#     (so launcherCheck's running_ref vs assigned_ref compare matches)
+#
+# Pre-NEW-31 history (CHANGELOG §38): install.sh used `payload-$VERSION`
+# (BARE) and never wrote .launcher_target. Re-installs left stale BARE
+# values from prior auto-revert paths (which wrote $CURRENT_TARGET
+# unnormalized). The mixed-shape state on canaries surfaced as flip-revert
+# loops every cron tick. Fixed by normalizing both directory naming +
+# .launcher_target write to TAG form here.
 VERSION=$(head -n 1 "$SOURCE_DIR/payload/VERSION" 2>/dev/null || echo "0.0.0")
-PAYLOAD_DEST="$INSTALL_ROOT/payload-$VERSION"
+case "$VERSION" in
+    v*) TAG_VERSION="$VERSION" ;;
+    *)  TAG_VERSION="v$VERSION" ;;
+esac
+PAYLOAD_DEST="$INSTALL_ROOT/payload-$TAG_VERSION"
 
 # Drop the launcher.
 cp "$SOURCE_DIR/launcher.sh" "$INSTALL_ROOT/launcher.sh"
@@ -176,6 +194,26 @@ ln -sfT "$PAYLOAD_DEST" "$INSTALL_ROOT/current.tmp" 2>/dev/null || \
     ln -sf "$PAYLOAD_DEST" "$INSTALL_ROOT/current.tmp"
 mv -T "$INSTALL_ROOT/current.tmp" "$INSTALL_ROOT/current" 2>/dev/null || \
     mv "$INSTALL_ROOT/current.tmp" "$INSTALL_ROOT/current"
+
+# Reset Phase 6 state files (CHANGELOG §38 NEW-32 / NEW-33).
+#
+# .launcher_target: pin to the just-installed TAG_VERSION explicitly. Without
+# this, fresh installs have an empty .launcher_target and updater.sh's
+# CURRENT_TARGET fallback reads payload/VERSION (BARE) which polluted
+# launcher_assignments.assigned_ref with bare-form rows on first /launcher_check.
+# Re-installs additionally inherited stale values from prior auto-revert paths.
+# Writing TAG form here is the only way to guarantee consistent shape across
+# fresh-install + re-install + post-flip + post-revert states.
+#
+# .previous_target: clear it. After install.sh runs, "previous version" is
+# undefined — the user just installed a fresh tree, there's no payload to
+# revert to. Writing an empty file (or removing it) ensures updater.sh's
+# auto-revert path sees the empty-string check + refuses to revert to a
+# non-existent payload (per updater.sh's "no previous_target" branch).
+echo "$TAG_VERSION" > "$INSTALL_ROOT/.launcher_target.tmp"
+mv "$INSTALL_ROOT/.launcher_target.tmp" "$INSTALL_ROOT/.launcher_target"
+chmod 644 "$INSTALL_ROOT/.launcher_target" 2>/dev/null || true
+rm -f "$INSTALL_ROOT/.previous_target" 2>/dev/null || true
 
 # Drop placeholder reload.sh (only if absent — CP-editable post-install).
 HOOK_PATH_DEFAULT="${INSTALL_ROOT}/reload.sh"
