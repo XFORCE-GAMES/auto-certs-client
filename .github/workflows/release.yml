@@ -1,12 +1,18 @@
 # Release pipeline — runs on every push of a v* tag.
 #
 # Outputs (attached to the GitHub Release):
-#   1. auto-certs-client-${VERSION}.tar.gz             — release tarball
-#   2. auto-certs-client-${VERSION}.tar.gz.sig         — cosign signature (Sigstore Rekor entry)
-#   3. auto-certs-client-${VERSION}.tar.gz.crt         — cosign certificate
-#   4. auto-certs-client-${VERSION}.spdx.json          — SPDX 2.3 SBOM (via syft)
-#   5. SHA256SUMS                                       — checksums for every artifact
-#   6. (out-of-band) build-provenance attestation     — SLSA v1, queryable via gh attestation verify
+#   1. auto-certs-client-${VERSION}.tar.gz                  — release tarball
+#   2. auto-certs-client-${VERSION}.tar.gz.sigstore.json    — cosign keyless bundle (signature + cert + Rekor proof)
+#   3. auto-certs-client-${VERSION}.tar.gz.release.sig      — RSA-4096 detached signature (Phase 6 client-trust path)
+#   4. auto-certs-client-${VERSION}.spdx.json               — SPDX 2.3 SBOM (via syft)
+#   5. install.sh                                           — bootstrap installer (the curl|sh entry point)
+#   6. SHA256SUMS                                           — checksums for every artifact
+#   7. (out-of-band) build-provenance attestation           — SLSA v1, queryable via gh attestation verify
+#
+# Pre-rc10 the cosign output was a `.sig` + `.crt` two-file pair (cosign
+# 2.x flow). Migrated to the single `.sigstore.json` bundle (cosign 3.x)
+# at v0.3.0-rc10 — pre-CP-onboarding migration so the bundle format is
+# the public baseline. See CHANGELOG §50 for rationale.
 #
 # All third-party actions pinned to commit SHA. Dependabot refreshes them via PR.
 #
@@ -90,27 +96,29 @@ jobs:
           tar -tzf "$tarball" | head -20
 
       - name: Install cosign
-        # Pinned to v3.10.1 (cosign 2.x — legacy --sig + --crt outputs
-        # supported without flag toggles). v4 of the installer pulls
-        # cosign 3+, which deprecates the legacy format and requires
-        # explicit --bundle / --new-bundle-format flags. Sticking with
-        # the 2.x flow keeps the README's `cosign verify-blob` commands
-        # simple and matches the pattern most CP MIS teams will already
-        # be familiar with from other open-source releases.
-        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5  # v3.10.1
+        # Bumped to v4.1.1 (cosign 3.x — Sigstore bundle format default)
+        # at v0.3.0-rc10 cut, before first-CP onboarding so the bundle
+        # format is the public baseline. cosign 3.x consolidates
+        # signature + certificate + transparency-log proof into a single
+        # `.sigstore.json` bundle file (Sigstore standard). The 2.x
+        # `--output-signature` + `--output-certificate` two-file flow
+        # was removed; `--bundle` is now required on `sign-blob`.
+        # `COSIGN_EXPERIMENTAL` is no longer needed (keyless is on by
+        # default in v3). Migration rationale + 7-step checklist:
+        # CHANGELOG §50 (rejecting initial deferral from §49 — pre-CP
+        # is the right time to migrate, since there are zero downstream
+        # consumers with frozen recipes).
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
 
       - name: Sign tarball with cosign (keyless OIDC)
         shell: bash
-        env:
-          COSIGN_EXPERIMENTAL: '1'
         run: |
           set -euo pipefail
           tarball="${{ steps.build.outputs.tarball }}"
           cosign sign-blob --yes \
-            --output-signature "${tarball}.sig" \
-            --output-certificate "${tarball}.crt" \
+            --bundle "${tarball}.sigstore.json" \
             "$tarball"
-          echo "Signed: ${tarball}.sig + ${tarball}.crt"
+          echo "Signed: ${tarball}.sigstore.json ($(stat -c%s "${tarball}.sigstore.json") bytes)"
 
       - name: Generate SBOM (SPDX 2.3 JSON)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
@@ -174,10 +182,11 @@ jobs:
           # actually resolves). Including it in SHA256SUMS lets operators
           # verify the bootstrap script independently of the tarball it
           # then auto-fetches.
+          # `.sigstore.json` is the cosign 3.x bundle (replaces the
+          # legacy `.sig` + `.crt` two-file pair as of v0.3.0-rc10).
           files=(
             "auto-certs-client-${version}.tar.gz"
-            "auto-certs-client-${version}.tar.gz.sig"
-            "auto-certs-client-${version}.tar.gz.crt"
+            "auto-certs-client-${version}.tar.gz.sigstore.json"
             "auto-certs-client-${version}.spdx.json"
             "install.sh"
           )
@@ -217,18 +226,18 @@ jobs:
             ```sh
             VERSION=${{ steps.version.outputs.version }}
             cosign verify-blob \
-              --certificate auto-certs-client-${VERSION}.tar.gz.crt \
-              --signature   auto-certs-client-${VERSION}.tar.gz.sig \
+              --bundle auto-certs-client-${VERSION}.tar.gz.sigstore.json \
               --certificate-identity-regexp "https://github.com/${{ github.repository }}/.*" \
               --certificate-oidc-issuer     "https://token.actions.githubusercontent.com" \
               auto-certs-client-${VERSION}.tar.gz
             ```
 
+            *(cosign 3.x bundle format — this release line uses `.sigstore.json` as of v0.3.0-rc10. Earlier rc1–rc9 used the legacy `--sig` + `--crt` two-file format with `cosign verify-blob --certificate <crt> --signature <sig>`.)*
+
             ## Artifacts
 
             - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz` — release tarball
-            - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.sig` — cosign signature (out-of-band MIS audit)
-            - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.crt` — cosign certificate
+            - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.sigstore.json` — cosign keyless bundle (signature + certificate + transparency-log proof; replaces the legacy `.sig` + `.crt` pair)
             - `auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.release.sig` — RSA-4096 detached signature (Phase 6 client-trust path; only present when `RELEASE_SIGNING_KEY` repo secret is set)
             - `auto-certs-client-${{ steps.version.outputs.version }}.spdx.json` — SBOM (SPDX 2.3)
             - `install.sh` — bootstrap installer (the curl|sh entry point; auto-fetches the tarball, SHA-256-verifies, and runs)
@@ -236,8 +245,7 @@ jobs:
             - SLSA build-provenance attestation — see the **Attestations** section
           files: |
             auto-certs-client-${{ steps.version.outputs.version }}.tar.gz
-            auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.sig
-            auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.crt
+            auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.sigstore.json
             auto-certs-client-${{ steps.version.outputs.version }}.tar.gz.release.sig
             auto-certs-client-${{ steps.version.outputs.version }}.spdx.json
             install.sh
