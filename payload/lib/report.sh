@@ -2,6 +2,31 @@
 # Sourced (not executed). Caller has set: AUTO_CERTS_LOG, APP_CODE,
 # BASE_DOMAIN, CERT_DIR, HOOK_PATH (etc., from /etc/auto-certs/conf.d/<app>.conf).
 
+# JSON-string-escape stdin → stdout (no enclosing quotes).
+#
+# RFC 8259 §7 forbids unescaped control characters (0x00–0x1F) inside string
+# values. The pre-NEW-37 escape pipeline stripped control chars *within
+# each line* but did not touch the line-separator newlines themselves —
+# so multi-line $_logtail / $_error / $_hook_output went into the JSON
+# payload with raw 0x0A bytes embedded, producing invalid JSON that
+# /api/v1/report rejected with HTTP 422 (and got queued at
+# /var/lib/auto-certs/queue/, retried forever, also 422).
+#
+# This helper:
+#   1. Escapes backslashes (\\) and double quotes (\")
+#   2. Strips control chars *within* each line ([[:cntrl:]])
+#   3. Joins multiple lines with literal `\n` (two chars: 0x5C 0x6E),
+#      which JSON parsers correctly decode as a newline.
+#
+# Tabs and CR are NOT specifically converted to `\t` / `\r` — the
+# [[:cntrl:]] strip removes them. That's a tradeoff: log lines lose
+# tabs but stay JSON-valid. If a future change wants tab preservation,
+# add `sed -e 's/\t/\\t/g'` BEFORE the [[:cntrl:]] strip.
+json_escape_stdin() {
+    sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[[:cntrl:]]//g' \
+        | awk 'BEGIN{ORS=""} NR>1{printf "\\n"} {printf "%s", $0}'
+}
+
 # Generate a UUID for attempt_id. Same primitives as ensure_machine_uuid.
 generate_attempt_id() {
     if [ -r /proc/sys/kernel/random/uuid ]; then
@@ -23,9 +48,8 @@ phase_event() {
     _detail="${2:-}"
     _ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "0")
     if [ -n "$_detail" ]; then
-        # JSON-escape the detail string crudely (works for ASCII; no shell
-        # tooling for full JSON escape is available without jq).
-        _det_esc=$(printf "%s" "$_detail" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[[:cntrl:]]//g')
+        # JSON-escape via the centralized helper (handles multi-line + ctrl chars).
+        _det_esc=$(printf "%s" "$_detail" | json_escape_stdin)
         _evt="{\"event\":\"${_name}\",\"ts\":\"${_ts}\",\"detail\":\"${_det_esc}\"}"
     else
         _evt="{\"event\":\"${_name}\",\"ts\":\"${_ts}\"}"
@@ -79,7 +103,7 @@ build_recent_log_tail() {
     fi
     tail -n 50 "$AUTO_CERTS_LOG" 2>/dev/null \
         | redact \
-        | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[[:cntrl:]]//g'
+        | json_escape_stdin
 }
 
 # Compose the full report payload as a JSON file at $1.
@@ -107,9 +131,10 @@ build_report_payload() {
     _logtail=$(build_recent_log_tail)
     _phase="${PHASE_EVENTS_JSON:-[]}"
 
-    # Escape error + hook_output for JSON
-    _err_esc=$(printf "%s" "$_error"      | redact | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[[:cntrl:]]//g')
-    _hook_esc=$(printf "%s" "$_hook_output" | redact | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[[:cntrl:]]//g')
+    # Escape error + hook_output for JSON via the centralized helper
+    # that also handles the multi-line case (NEW-37 fix).
+    _err_esc=$(printf "%s"  "$_error"       | redact | json_escape_stdin)
+    _hook_esc=$(printf "%s" "$_hook_output" | redact | json_escape_stdin)
     _tls_compact="${_tls_result:-{}}"
 
     # Build the payload. Optional fields are null if empty.
@@ -227,8 +252,7 @@ build_self_check_payload() {
     _reported_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     _launcher_version=$(payload_version)
 
-    _reason_esc=$(printf "%s" "$_failure_reason" | redact \
-        | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[[:cntrl:]]//g')
+    _reason_esc=$(printf "%s" "$_failure_reason" | redact | json_escape_stdin)
 
     {
         printf '{'
