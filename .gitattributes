@@ -15,5 +15,15 @@ VERSION     text eol=lf
 *.yaml      text eol=lf
 *.json      text eol=lf
 
+# PEM files (cryptographic keys / certs) — LF only.
+# OpenSSL produces LF on every platform; CRLF works for PEM parsers but
+# is asymmetric across platforms. Without this rule, `text=auto` below
+# auto-detects the working tree's line endings, so a Windows checkout
+# stages CRLF after editing — which mismatches what the auto-certs
+# server worktree (Linux dev VM) writes. v0.3.0-rc6 cut surfaced the
+# divergence: `client/payload/lib/server-pubkey.pem` had identical
+# bytes after CRLF normalization but different SHA-256s on disk.
+*.pem       text eol=lf
+
 # Default: let git decide.
 *           text=auto
