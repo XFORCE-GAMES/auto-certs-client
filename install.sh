@@ -162,9 +162,10 @@ done
 #   AUTO_CERTS_INSTALL_RELEASE default: latest  (or a tag like v0.3.0-rc9)
 if [ -z "$SOURCE_DIR" ]; then
     BOOT_TMP=$(mktemp -d)
-    # Cleanup on any exit path. Quoted-single-quote inside the trap so the
-    # path expands now (when BOOT_TMP is set), not later.
-    trap "rm -rf '$BOOT_TMP'" EXIT INT TERM
+    # Cleanup on any exit path. Single-quoted to defer $BOOT_TMP expansion
+    # to trap-fire time (shellcheck SC2064). Functionally equivalent since
+    # BOOT_TMP is never reassigned.
+    trap 'rm -rf "$BOOT_TMP"' EXIT INT TERM
     GH_REPO="${AUTO_CERTS_INSTALL_REPO:-XFORCE-GAMES/auto-certs-client}"
     INS_FLAG=""; WGET_INS=""
     if [ "${AUTO_CERTS_INSECURE_BOOTSTRAP:-0}" = "1" ]; then
