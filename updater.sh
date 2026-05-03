@@ -23,6 +23,13 @@ MACHINE_ID_PATH="${AUTO_CERTS_MACHINE_ID:-/etc/auto-certs/machine_id}"
 LOG_FILE="${AUTO_CERTS_UPDATER_LOG:-/var/log/auto-certs/updater.log}"
 PAYLOAD_LIB="${INSTALL_ROOT}/current/lib"
 
+# NEW-39 (CHANGELOG §43): bundled Mozilla CA bundle for old hosts
+# (CentOS 6's 2013-era ca-certificates can't validate GitHub TLS).
+# Set BEFORE sourcing http.sh — http_get checks $AUTO_CERTS_CACERT
+# and adds --cacert if readable. Falls through to system CA when
+# unset/missing (modern-host installs that didn't bundle cacert).
+export AUTO_CERTS_CACERT="${PAYLOAD_LIB}/cacert.pem"
+
 if [ ! -r "${PAYLOAD_LIB}/common.sh" ]; then
     echo "updater: payload lib not readable at ${PAYLOAD_LIB}; aborting" >&2
     exit 0

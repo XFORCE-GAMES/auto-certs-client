@@ -30,6 +30,16 @@ PAYLOAD_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIB_DIR="$PAYLOAD_DIR/lib"
 PUBKEY_FILE="$LIB_DIR/server-pubkey.pem"
 
+# NEW-39 (CHANGELOG §43): point http.sh's curl/wget at the bundled
+# Mozilla CA bundle. CentOS 6's 2013-era ca-certificates package
+# can't validate GitHub's modern cert chain; the bundled cacert.pem
+# fixes that without falling back to --insecure. On modern hosts
+# (CentOS 7+, Ubuntu 16+) the bundled CA bundle works equally well
+# as the system CA, so no platform-specific branching is needed.
+# http.sh checks $AUTO_CERTS_CACERT and uses it if readable; falls
+# through to system CA otherwise.
+export AUTO_CERTS_CACERT="$LIB_DIR/cacert.pem"
+
 # shellcheck disable=SC1091
 . "$LIB_DIR/common.sh"
 # shellcheck disable=SC1091

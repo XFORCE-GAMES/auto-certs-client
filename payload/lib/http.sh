@@ -48,6 +48,15 @@ http_get() {
                --connect-timeout 10 --max-time 60 \
                --dump-header "$_hdrout" \
                -o "$_out"
+        # NEW-39 (CHANGELOG §43): use the bundled Mozilla CA cert
+        # if the caller set $AUTO_CERTS_CACERT to a readable path.
+        # This makes CentOS 6 hosts (whose 2013-era ca-certificates
+        # package can't validate GitHub's modern cert chain) able to
+        # do TLS validation without falling back to --insecure.
+        # auto_certs.sh + updater.sh set this env var before sourcing.
+        if [ -n "${AUTO_CERTS_CACERT:-}" ] && [ -r "${AUTO_CERTS_CACERT}" ]; then
+            set -- "$@" --cacert "${AUTO_CERTS_CACERT}"
+        fi
         if [ -n "$_token" ]; then
             set -- "$@" -H "Authorization: Bearer $_token"
         fi
@@ -73,6 +82,10 @@ http_get() {
                --connect-timeout=10 --read-timeout=60 \
                --server-response \
                -O "$_out"
+        # NEW-39: wget equivalent of --cacert is --ca-certificate.
+        if [ -n "${AUTO_CERTS_CACERT:-}" ] && [ -r "${AUTO_CERTS_CACERT}" ]; then
+            set -- "$@" --ca-certificate="${AUTO_CERTS_CACERT}"
+        fi
         if [ -n "$_token" ]; then
             set -- "$@" --header="Authorization: Bearer $_token"
         fi
@@ -129,6 +142,10 @@ http_post_json() {
                -H "Content-Type: application/json" \
                --data-binary "@$_payload" \
                -o "$_resp"
+        # NEW-39 (CHANGELOG §43): bundled CA — see http_get's matching block.
+        if [ -n "${AUTO_CERTS_CACERT:-}" ] && [ -r "${AUTO_CERTS_CACERT}" ]; then
+            set -- "$@" --cacert "${AUTO_CERTS_CACERT}"
+        fi
         if [ -n "$_token" ]; then
             set -- "$@" -H "Authorization: Bearer $_token"
         fi
@@ -152,6 +169,9 @@ http_post_json() {
                --header="Content-Type: application/json" \
                --post-file="$_payload" \
                -O "$_resp"
+        if [ -n "${AUTO_CERTS_CACERT:-}" ] && [ -r "${AUTO_CERTS_CACERT}" ]; then
+            set -- "$@" --ca-certificate="${AUTO_CERTS_CACERT}"
+        fi
         if [ -n "$_token" ]; then
             set -- "$@" --header="Authorization: Bearer $_token"
         fi
