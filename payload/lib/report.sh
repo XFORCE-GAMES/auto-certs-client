@@ -135,7 +135,15 @@ build_report_payload() {
     # that also handles the multi-line case (NEW-37 fix).
     _err_esc=$(printf "%s"  "$_error"       | redact | json_escape_stdin)
     _hook_esc=$(printf "%s" "$_hook_output" | redact | json_escape_stdin)
-    _tls_compact="${_tls_result:-{}}"
+
+    # NOTE: pre-rc11 this had `_tls_compact="${_tls_result:-{}}"`. POSIX
+    # `sh` ends the expansion at the FIRST `}`, so when _tls_result was
+    # non-empty (the common case post-rc8 once tls_selftest started
+    # returning real data), the expansion appended a stray `}` —
+    # producing `{"all":"skipped"}}` and breaking the outer JSON with
+    # an "Extra data" parse error on the server side. Line 157 below
+    # already gates on non-empty + non-`{}`, so $_tls_result can be
+    # used directly without any default.
 
     # Build the payload. Optional fields are null if empty.
     {
@@ -155,7 +163,7 @@ build_report_payload() {
             printf '"hook_output":"%s",' "$_hook_esc"
         fi
         if [ -n "$_tls_result" ] && [ "$_tls_result" != "{}" ]; then
-            printf '"tls_self_test_result":%s,' "$_tls_compact"
+            printf '"tls_self_test_result":%s,' "$_tls_result"
         fi
         printf '"phase_events":%s,' "$_phase"
         printf '"environment":%s,' "$_env"
