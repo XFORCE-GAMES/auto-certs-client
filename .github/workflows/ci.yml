@@ -89,7 +89,7 @@ jobs:
           install_loc=$(wc -l < install.sh)
           echo "launcher.sh                         : $launcher_loc lines (cap: 80)"
           echo "payload/auto_certs.sh + lib/*.sh    : $payload_loc lines (cap: 1600)"
-          echo "install.sh                          : $install_loc lines (cap: 500)"
+          echo "install.sh                          : $install_loc lines (cap: 600)"
           fail=0
           [ "$launcher_loc" -le 80 ] || { echo "::error::launcher.sh exceeds cap"; fail=1; }
           # Cap bumped 1500→1600 in v0.3.0-rc7 to accommodate NEW-39 fix
@@ -100,9 +100,14 @@ jobs:
           # GitHub API, fetches SHA256SUMS + tarball, SHA-256-verifies,
           # extracts, and proceeds. Replaces the "Phase 7 will add GitHub
           # fetch" stub. ~80 lines for the full bootstrap path.
+          # install.sh cap bumped 500→600 in v0.3.0-rc12 to accommodate
+          # the email-installer fast-path (§68): --api-token / --bundle-
+          # password arms, paired-flag validation, two-stage conf write
+          # (PATCH STAGE that filters + appends secret lines), and the
+          # expanded header-comment doctrine block. Total ~70 lines.
           # Headroom is intentional — security fixes + functional features
           # shouldn't be gated by a cosmetic LOC cap. Bump again if future
           # fixes legitimately push past.
           [ "$payload_loc"  -le 1600 ] || { echo "::error::payload total exceeds cap"; fail=1; }
-          [ "$install_loc"  -le 500 ] || { echo "::error::install.sh exceeds cap"; fail=1; }
+          [ "$install_loc"  -le 600 ] || { echo "::error::install.sh exceeds cap"; fail=1; }
           exit "$fail"
