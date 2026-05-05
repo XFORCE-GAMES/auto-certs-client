@@ -146,9 +146,15 @@ fi
 check_required_fields() {
     _MISSING_FIELDS=""
     [ -z "${APP_CODE:-}" ]        && _MISSING_FIELDS="${_MISSING_FIELDS} APP_CODE"
-    [ -z "${BASE_DOMAIN:-}" ]     && _MISSING_FIELDS="${_MISSING_FIELDS} BASE_DOMAIN"
     [ -z "${API_TOKEN:-}" ]       && _MISSING_FIELDS="${_MISSING_FIELDS} API_TOKEN"
     [ -z "${BUNDLE_PASSWORD:-}" ] && _MISSING_FIELDS="${_MISSING_FIELDS} BUNDLE_PASSWORD"
+    # BASE_DOMAIN is NO LONGER required — post-§75 the server returns the
+    # authoritative base_domain in every /api/v1/check response. The conf
+    # field is now an optional override (delegated-CNAME / custom-domain
+    # CPs) or a back-compat fallback for old servers that don't return
+    # the field. Without it AND without server-provided value, process_app
+    # errors precisely with a "no base_domain" message; check_required_fields
+    # no longer flags it pre-/check.
     # Trim leading space.
     _MISSING_FIELDS=$(echo "$_MISSING_FIELDS" | sed 's/^ *//')
 }
@@ -246,11 +252,23 @@ process_app() {
         return 0
     fi
 
-    # Defaults.
+    # Defaults. CERT_DIR is resolved AFTER /check (post-§75) — the
+    # server's authoritative base_domain comes from the response, and
+    # the conf-file BASE_DOMAIN is an optional override / back-compat
+    # fallback. We use a tentative directory here just for the
+    # pre-/check local-bundle-hash compute; if the conf BASE_DOMAIN was
+    # wrong (the popstone-shared problem), the local hash will read
+    # empty, /check will return "update", and we'll re-resolve CERT_DIR
+    # using the server's base_domain before the install lands.
     : "${SERVER_URL:=https://auto-certs.xforce-games.com}"
-    : "${CERT_DIR:=/etc/auto-certs/$BASE_DOMAIN}"
     : "${HOOK_PATH:=/opt/auto-certs/reload.sh}"
     : "${LOG_DIR:=$LOG_DIR_BASE}"
+    # Tentative CERT_DIR for the pre-/check hash compute. Only used if
+    # CERT_DIR isn't explicitly set in the conf AND BASE_DOMAIN is set
+    # there. Re-resolved authoritatively after /check.
+    if [ -z "${CERT_DIR:-}" ] && [ -n "${BASE_DOMAIN:-}" ]; then
+        CERT_DIR="/etc/auto-certs/$BASE_DOMAIN"
+    fi
 
     AUTO_CERTS_LOG="$LOG_DIR/${APP_CODE}.log"
     mkdir -p "$LOG_DIR" 2>/dev/null || true
@@ -314,6 +332,37 @@ process_app() {
     _resp=$(cat "$_tmp" 2>/dev/null || echo "{}")
     rm -f "$_tmp" "${_tmp}.headers" 2>/dev/null || true
     log_info "check response: $(echo "$_resp" | redact)"
+
+    # Server-authoritative base_domain (added in §75). Empty if the server
+    # is pre-§75 — fall back to conf BASE_DOMAIN. If the server's value
+    # differs from the conf's (the popstone-shared scenario), use the
+    # server's: it's the source of truth for the cert's actual subject
+    # and therefore the correct install path.
+    _server_base_domain=""
+    case "$_resp" in
+        *'"base_domain":"'*)
+            _server_base_domain=$(echo "$_resp" | sed -E 's/.*"base_domain":"([^"]*)".*/\1/')
+            ;;
+    esac
+    if [ -n "$_server_base_domain" ]; then
+        if [ -n "${BASE_DOMAIN:-}" ] && [ "$BASE_DOMAIN" != "$_server_base_domain" ]; then
+            log_warn "conf BASE_DOMAIN ($BASE_DOMAIN) differs from server's ($_server_base_domain) — using server value"
+        fi
+        BASE_DOMAIN="$_server_base_domain"
+    fi
+    # Final guard: SOMETHING must have provided base_domain. If neither
+    # the conf nor the server did, we can't proceed (no CERT_DIR target,
+    # no env var for the reload hook). Should only fire on pre-§75
+    # server + a conf without BASE_DOMAIN, which is a misconfiguration.
+    if [ -z "${BASE_DOMAIN:-}" ]; then
+        log_error "no base_domain — server didn't return one and conf doesn't set BASE_DOMAIN"
+        return 1
+    fi
+    # Authoritative CERT_DIR resolution. If the conf set CERT_DIR
+    # explicitly (override case), we keep that. Otherwise derive from
+    # the now-known base_domain. (If the conf BASE_DOMAIN was wrong
+    # initially, this re-resolves to the right path here.)
+    : "${CERT_DIR:=/etc/auto-certs/$BASE_DOMAIN}"
 
     # Crude JSON parse — POSIX sh doesn't have jq.
     case "$_resp" in

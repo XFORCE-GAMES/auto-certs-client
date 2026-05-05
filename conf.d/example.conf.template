@@ -12,8 +12,14 @@
 # unless you know what you're doing.
 
 APP_CODE=__APP_CODE__
-BASE_DOMAIN=__BASE_DOMAIN__   # override only for delegated-CNAME / custom-domain CPs
 SERVER_URL=__SERVER_URL__
+
+# BASE_DOMAIN is OPTIONAL since v0.3.0-rc14 — the server returns the
+# authoritative value in every /api/v1/check response, and the client
+# uses that to derive CERT_DIR + the AUTO_CERTS_BASE_DOMAIN env var
+# passed to the reload hook. Set this only if you need to OVERRIDE
+# the server's value (delegated-CNAME / custom-domain setups).
+# BASE_DOMAIN=__BASE_DOMAIN__
 
 # === REQUIRED — paste these from the install-instructions email ===
 # Until both are filled in, the launcher refuses to call the API and
