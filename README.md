@@ -8,7 +8,7 @@ See [SECURITY.md](SECURITY.md) for cryptographic verification of releases (Sigst
 
 ## Quick start (for CP MIS reading this before installing)
 
-Two-step install. **Secrets are NEVER passed on the command line** — they would leak into `~/.bash_history`, `ps aux`, and any session-recording. Same shape every credential-aware CLI ships (kubectl, gh, doctl, …).
+Two-step install. The default flow keeps secrets at-rest in a 0600 file (`/etc/auto-certs/conf.d/<app>.conf`) instead of typing them on the install command line — argv values can land in `~/.bash_history`, `ps aux`, and tee'd session-recordings. This is the same shape every credential-aware CLI ships (kubectl, gh, doctl, …). The operator who emails you the install instructions may include alternative one-step variants tailored to your environment; this README documents the audit-friendly default.
 
 **Step 1 — install** (no secrets in argv):
 
