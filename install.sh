@@ -515,8 +515,16 @@ fi
 echo
 echo "auto-certs install: DONE for $APP_CODE."
 echo "  Next steps:"
-echo "  1. EDIT ${APP_CONF}"
-echo "       set API_TOKEN= and BUNDLE_PASSWORD= from the install-instructions email."
-echo "  2. EDIT ${HOOK_PATH_DEFAULT}"
+# If the email-installer fast-path populated the conf already, skip the
+# edit-config step — telling the CP MIS to edit a file we just filled
+# in is confusing. Step numbering re-flows accordingly.
+_step=1
+if [ -z "$API_TOKEN" ] || [ -z "$BUNDLE_PASSWORD" ]; then
+    echo "  ${_step}. EDIT ${APP_CONF}"
+    echo "       set API_TOKEN= and BUNDLE_PASSWORD= from the install-instructions email."
+    _step=$((_step + 1))
+fi
+echo "  ${_step}. EDIT ${HOOK_PATH_DEFAULT}"
 echo "       replace the 'exit 1' default with your reload command."
-echo "  3. TEST: sudo ${INSTALL_ROOT}/launcher.sh --once --app ${APP_CODE}"
+_step=$((_step + 1))
+echo "  ${_step}. TEST: sudo ${INSTALL_ROOT}/launcher.sh --once --app ${APP_CODE}"
