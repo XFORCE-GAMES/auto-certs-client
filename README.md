@@ -53,6 +53,48 @@ If you forget to fill in `API_TOKEN=` or `BUNDLE_PASSWORD=`, the launcher refuse
 
 **Multi-app on one host**: re-run the installer with a different `--app` value. Existing configs and reload hook are preserved; only the binary tree is upgraded.
 
+## CentOS 6 bootstrap
+
+If you're installing on a CentOS 6 host and the standard `curl | sh` one-liner from Step 1 fails with:
+
+```
+curl: (60) SSL certificate problem: unable to get local issuer certificate
+```
+
+…it's because CentOS 6's `ca-certificates` package predates the Let's Encrypt root that signs `objects.githubusercontent.com` (where GitHub serves release asset downloads). It's a chicken-and-egg between trust-store age and TLS validation.
+
+**One-time bootstrap workaround** — use `--insecure` for the initial fetch only:
+
+```sh
+curl --insecure -sSL \
+  https://github.com/XFORCE-GAMES/auto-certs-client/releases/latest/download/install.sh \
+  | sudo sh -s -- --app <app_code>
+```
+
+This is acceptable for **this one fetch** because:
+
+1. **The downloaded `install.sh` is verified separately.** Each release publishes `SHA256SUMS` + a cosign-keyless detached signature; the install script's content is reproducible from the public artifacts. Optional belt-and-braces: download `install.sh` + `SHA256SUMS` + `SHA256SUMS.sig` + `SHA256SUMS.crt` separately, run `cosign verify-blob` (see the release page for the exact command), then re-execute locally without `--insecure`.
+2. **After install, the client carries its own bundled Mozilla CA bundle** at `/opt/auto-certs/current/lib/cacert.pem`. Every subsequent fetch uses that explicitly via `curl --cacert ...`. Your system `ca-certificates` package is no longer in the trust path for any auto-certs operation.
+
+**Alternative — install on a modern host first, then `scp` the artifacts**:
+
+If `--insecure` is against your security policy, run the curl on any modern host (RHEL 7+, Ubuntu 16+, macOS, etc.), then `scp` the resulting `install.sh` to the CentOS 6 host and run it locally:
+
+```sh
+# On a modern host:
+curl -sSL \
+  https://github.com/XFORCE-GAMES/auto-certs-client/releases/latest/download/install.sh \
+  -o install.sh
+scp install.sh user@centos6-host:/tmp/
+
+# On the CentOS 6 host:
+sudo sh /tmp/install.sh --app <app_code>
+```
+
+The `install.sh` script itself runs fine on CentOS 6; only the bootstrap-fetch needs a modern TLS stack.
+
+**Why we don't recommend `yum update ca-certificates`**: yum on CentOS 6 also uses the (same-vintage) system trust store to validate `mirrorlist.centos.org`. The update path itself is broken on the same chain. It works in some configurations (vault.centos.org via HTTP, or replaced repo URLs), but those workarounds are outside our scope. The `--insecure`-once-then-bundle approach above is more reliable and operationally narrower.
+
 ## Repo layout
 
 ```
