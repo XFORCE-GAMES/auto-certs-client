@@ -1,14 +1,18 @@
 #!/bin/sh
 # auto-certs installer.
 #
-# Two-step CP onboarding (per docs/plans/install-flow-redesign.md):
+# Two install paths — the public README documents the two-step path; the
+# email-installer fast-path is documented ONLY in the install-instructions
+# email body (private channel — not in the public README).
+#
+# === Public path (two-step, per docs/plans/install-flow-redesign.md) ===
 #
 #   STEP 1 — install (no secrets in argv, so nothing leaks to ~/.bash_history):
 #     curl -sSL https://github.com/XFORCE-GAMES/auto-certs-client/releases/latest/download/install.sh \
 #       | sudo sh -s -- --app <app_code>
 #
-#   STEP 2 — fill in the per-app config (the CP MIS pastes values from the
-#   per-app chat group into the placeholder file dropped here):
+#   STEP 2 — fill in the per-app config (the CP MIS pastes values from
+#   the install-instructions email into the placeholder file dropped here):
 #     sudo $EDITOR /etc/auto-certs/conf.d/<app_code>.conf
 #       # set API_TOKEN= and BUNDLE_PASSWORD=
 #
@@ -20,6 +24,27 @@
 # into any session-recording. Editing the config file in place keeps
 # them at-rest in a 0600 file — the same shape every credential-aware
 # tool ships (kubectl, gh, doctl, etc.).
+#
+# === Email-installer fast-path (one-line install, opt-in via --api-token + --bundle-password) ===
+#
+# When the per-app install email is sent (admin "Email install instructions
+# to MIS" button, CHANGELOG §60), the email body includes a one-liner that
+# pre-fills the conf with the credentials and uses `history -d` to scrub
+# the line from shell history afterwards:
+#
+#   curl -sSL <release-url>/install.sh | sudo sh -s -- \
+#     --app <app_code> \
+#     --api-token '<API_TOKEN>' \
+#     --bundle-password '<BUNDLE_PASSWORD>' \
+#   ; history -d $(history 1 | awk '{print $1}') 2>/dev/null; history -w 2>/dev/null
+#
+# Tradeoff: the secrets ride argv (visible in `ps aux` during the brief
+# install window — single-user CP boxes only) in exchange for skipping
+# Step 2. The email itself already carries the secrets in plaintext so
+# this path doesn't add new leak surface beyond the email channel.
+# These flags are deliberately NOT advertised in the public README — the
+# audience for the README is CP MIS auditing the install path, who
+# should see the safe two-step flow first.
 #
 # Idempotent re-run:
 #   - Upgrades the launcher + payload tree.
@@ -51,6 +76,12 @@ ETC_ROOT="${AUTO_CERTS_ETC_ROOT:-/etc/auto-certs}"
 LOG_ROOT="${AUTO_CERTS_LOG_ROOT:-/var/log/auto-certs}"
 LIB_ROOT="${AUTO_CERTS_LIB_ROOT:-/var/lib/auto-certs}"
 SOURCE_DIR="${AUTO_CERTS_SOURCE_DIR:-}"  # local dir to copy from (testing only)
+# Email-installer fast-path inputs (see header comment). Both required
+# together when used; either both empty or both non-empty. Captured into
+# the per-app conf during the WRITE STAGE below. Default empty → standard
+# two-step flow (placeholder conf, CP MIS edits in Step 2).
+API_TOKEN=""
+BUNDLE_PASSWORD=""
 
 usage() {
     cat <<USAGE
@@ -63,14 +94,22 @@ auto-certs install.sh — usage:
 
 Required: --app
 
-Secrets (API_TOKEN, BUNDLE_PASSWORD) are NOT taken on the command line —
-they would leak into ~/.bash_history and \`ps aux\`. Instead this installer
-drops a placeholder /etc/auto-certs/conf.d/<app_code>.conf with the
-required fields blank; you edit that file (mode 0600) to paste the
-values from the per-app chat group.
+By default the standard two-step flow applies: this installer drops a
+placeholder /etc/auto-certs/conf.d/<app_code>.conf (mode 0600) with the
+required fields blank; you edit that file to paste API_TOKEN and
+BUNDLE_PASSWORD from the install-instructions email.
+
+Email-installer fast-path (used by the install-instructions email):
+    install.sh --app <app_code> \\
+        --api-token '<API_TOKEN>' \\
+        --bundle-password '<BUNDLE_PASSWORD>'
+This populates the conf file directly, skipping Step 2. Both flags must
+appear together. Caller is expected to scrub the command from shell
+history afterwards (the email one-liner does this with \`history -d\`).
 
 Multi-app on one host: re-run with --app <other_code>. Existing
-configs are preserved.
+configs are preserved (the secret lines are patched in if --api-token /
+--bundle-password are passed; other fields are preserved as-is).
 USAGE
 }
 
@@ -79,11 +118,17 @@ while [ $# -gt 0 ]; do
         --app)             APP_CODE="$2"; shift 2 ;;
         --server-url)      SERVER_URL="$2"; shift 2 ;;
         --source-dir)      SOURCE_DIR="$2"; shift 2 ;;
-        # Friendly hard-fails on the old flag set so anyone copy-pasting a
-        # stale install one-liner gets a clear pointer to the new flow.
-        --token|--bundle-password|--base-domain|--cert-dir|--hook)
+        --api-token)       API_TOKEN="$2"; shift 2 ;;
+        --bundle-password) BUNDLE_PASSWORD="$2"; shift 2 ;;
+        # Friendly hard-fails on legacy flag spellings — these had different
+        # semantics in pre-§28 install.sh and exist here only to give a clear
+        # error to anyone copy-pasting a stale one-liner. The new spellings
+        # above (`--api-token`) replace `--token`; the per-app config-file
+        # fields like `--base-domain`, `--cert-dir`, `--hook` are now in the
+        # conf.d/<app>.conf file, not on the command line.
+        --token|--base-domain|--cert-dir|--hook)
             echo "auto-certs install: --$(echo "$1" | sed 's/^--//') is no longer accepted on the command line." >&2
-            echo "  Secrets and per-app config now live in /etc/auto-certs/conf.d/<app>.conf — see usage:" >&2
+            echo "  See usage:" >&2
             echo >&2
             usage >&2
             exit 2
@@ -96,6 +141,16 @@ done
 if [ -z "$APP_CODE" ]; then
     echo "auto-certs install: --app is required" >&2
     usage >&2
+    exit 2
+fi
+
+# --api-token and --bundle-password are paired: either both or neither.
+if [ -n "$API_TOKEN" ] && [ -z "$BUNDLE_PASSWORD" ]; then
+    echo "auto-certs install: --api-token requires --bundle-password (paired)" >&2
+    exit 2
+fi
+if [ -z "$API_TOKEN" ] && [ -n "$BUNDLE_PASSWORD" ]; then
+    echo "auto-certs install: --bundle-password requires --api-token (paired)" >&2
     exit 2
 fi
 
@@ -154,7 +209,7 @@ done
 #   SHA-256 check is the SOLE trust anchor; the CP MIS MUST verify the
 #   expected hash out-of-band against a trusted channel (e.g. the GitHub
 #   release page viewed from a modern browser, or a hash communicated
-#   through the per-app chat group). See cp-onboarding-flow.md §"Special
+#   out-of-band by the operator). See cp-onboarding-flow.md §"Special
 #   cases — CentOS 6 first-install bootstrap".
 #
 # Override repo / release for testing:
@@ -326,8 +381,14 @@ fi
 APP_CONF="$ETC_ROOT/conf.d/${APP_CODE}.conf"
 TEMPLATE="$SOURCE_DIR/conf.d/example.conf.template"
 
+# --- WRITE STAGE: ensure conf file exists --------------------------------
+# The conf file is created if absent. CP edits are preserved on re-run
+# (the secret-patch step below is the ONLY thing that touches an existing
+# conf, and only when --api-token / --bundle-password are explicitly
+# provided on this invocation).
+CONF_DROPPED_THIS_RUN=0
 if [ -f "$APP_CONF" ]; then
-    echo "auto-certs install: $APP_CONF already exists — preserving CP edits."
+    : # exists — preserve as-is; secret-patch step may patch in below.
 elif [ -r "$TEMPLATE" ]; then
     # Fill the template's __APP_CODE__ / __BASE_DOMAIN__ / __SERVER_URL__
     # markers; everything else stays as the template author wrote it.
@@ -341,8 +402,8 @@ elif [ -r "$TEMPLATE" ]; then
         "$TEMPLATE" > "${APP_CONF}.tmp"
     mv "${APP_CONF}.tmp" "$APP_CONF"
     chmod 600 "$APP_CONF"
+    CONF_DROPPED_THIS_RUN=1
     echo "auto-certs install: dropped placeholder $APP_CONF (mode 600)"
-    echo "auto-certs install: EDIT $APP_CONF — set API_TOKEN= and BUNDLE_PASSWORD= from the per-app chat group."
 else
     # Fallback: emit a minimal placeholder inline so the installer is
     # robust against a missing/renamed template.
@@ -355,7 +416,7 @@ else
         echo "BASE_DOMAIN=${BASE_DOMAIN_DEFAULT}"
         echo "SERVER_URL=${SERVER_URL}"
         echo ""
-        echo "# === REQUIRED — paste from the per-app chat group ==="
+        echo "# === REQUIRED — paste from the install-instructions email ==="
         echo "API_TOKEN="
         echo "BUNDLE_PASSWORD="
         echo ""
@@ -368,8 +429,34 @@ else
     } > "${APP_CONF}.tmp"
     mv "${APP_CONF}.tmp" "$APP_CONF"
     chmod 600 "$APP_CONF"
+    CONF_DROPPED_THIS_RUN=1
     echo "auto-certs install: dropped placeholder $APP_CONF (mode 600; inline fallback)"
-    echo "auto-certs install: EDIT $APP_CONF — set API_TOKEN= and BUNDLE_PASSWORD= from the per-app chat group."
+fi
+
+# --- PATCH STAGE: populate API_TOKEN + BUNDLE_PASSWORD if provided -------
+# Only runs when both --api-token and --bundle-password were on the
+# command line (paired check above). Other CP edits (CERT_DIR, HOOK_PATH,
+# JKS_PASSWORD, LOCAL_TLS_TARGETS, …) are preserved by filtering the
+# existing file and appending the new secret lines at the end. Using
+# `printf '%s\n'` avoids any shell-interpolation / sed-escaping concerns
+# regardless of what charset the token / password use.
+if [ -n "$API_TOKEN" ] && [ -n "$BUNDLE_PASSWORD" ]; then
+    {
+        # `|| true` because grep -v returns non-zero when its filter eats
+        # all input lines (impossible with our conf shape, but harmless).
+        grep -v -E '^(API_TOKEN|BUNDLE_PASSWORD)=' "$APP_CONF" || true
+        echo ""
+        echo "# Set by install.sh --api-token / --bundle-password on $(date)"
+        printf 'API_TOKEN=%s\n' "$API_TOKEN"
+        printf 'BUNDLE_PASSWORD=%s\n' "$BUNDLE_PASSWORD"
+    } > "${APP_CONF}.tmp"
+    mv "${APP_CONF}.tmp" "$APP_CONF"
+    chmod 600 "$APP_CONF"
+    echo "auto-certs install: populated API_TOKEN and BUNDLE_PASSWORD in $APP_CONF"
+elif [ "$CONF_DROPPED_THIS_RUN" = "1" ]; then
+    echo "auto-certs install: EDIT $APP_CONF — set API_TOKEN= and BUNDLE_PASSWORD= from the install-instructions email."
+else
+    echo "auto-certs install: $APP_CONF already exists — preserving CP edits."
 fi
 
 # Lazy-generate machine_id.
@@ -429,7 +516,7 @@ echo
 echo "auto-certs install: DONE for $APP_CODE."
 echo "  Next steps:"
 echo "  1. EDIT ${APP_CONF}"
-echo "       set API_TOKEN= and BUNDLE_PASSWORD= from the per-app chat group."
+echo "       set API_TOKEN= and BUNDLE_PASSWORD= from the install-instructions email."
 echo "  2. EDIT ${HOOK_PATH_DEFAULT}"
 echo "       replace the 'exit 1' default with your reload command."
 echo "  3. TEST: sudo ${INSTALL_ROOT}/launcher.sh --once --app ${APP_CODE}"

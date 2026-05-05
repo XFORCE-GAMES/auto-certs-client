@@ -22,7 +22,7 @@ curl -sSL https://github.com/XFORCE-GAMES/auto-certs-client/releases/latest/down
 ```sh
 sudo $EDITOR /etc/auto-certs/conf.d/<app_code>.conf
 # Fill in the empty API_TOKEN= and BUNDLE_PASSWORD= lines with the
-# values delivered to you in the per-app chat group.
+# values delivered to you in the install-instructions email.
 ```
 
 **Step 3 — edit the reload hook**:
@@ -44,7 +44,7 @@ The installer:
 
 1. Drops the launcher to `/opt/auto-certs/launcher.sh`.
 2. Drops the payload (the actual fetch/verify/install logic) to `/opt/auto-certs/payload-<version>/` and points `/opt/auto-certs/current` at it.
-3. Drops a placeholder per-app config to `/etc/auto-certs/conf.d/<app_code>.conf` (mode 0600) with `API_TOKEN=` and `BUNDLE_PASSWORD=` empty — **YOU EDIT THIS** with the values from the per-app chat group.
+3. Drops a placeholder per-app config to `/etc/auto-certs/conf.d/<app_code>.conf` (mode 0600) with `API_TOKEN=` and `BUNDLE_PASSWORD=` empty — **YOU EDIT THIS** with the values from the install-instructions email.
 4. Generates a per-machine UUID at `/etc/auto-certs/machine_id` if absent (excluded from snapshot seal).
 5. Drops a placeholder reload hook to `/opt/auto-certs/reload.sh` — **YOU EDIT THIS** to do whatever your stack needs.
 6. Adds a daily cron entry that runs `/opt/auto-certs/launcher.sh`.

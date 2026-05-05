@@ -15,7 +15,7 @@ APP_CODE=__APP_CODE__
 BASE_DOMAIN=__BASE_DOMAIN__   # override only for delegated-CNAME / custom-domain CPs
 SERVER_URL=__SERVER_URL__
 
-# === REQUIRED — paste these from the per-app chat group ===
+# === REQUIRED — paste these from the install-instructions email ===
 # Until both are filled in, the launcher refuses to call the API and
 # prints a clear "config incomplete" error to stderr and the per-app log.
 API_TOKEN=

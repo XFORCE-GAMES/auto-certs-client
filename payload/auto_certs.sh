@@ -153,10 +153,11 @@ check_required_fields() {
     _MISSING_FIELDS=$(echo "$_MISSING_FIELDS" | sed 's/^ *//')
 }
 
-# Multi-line CP-actionable error pointing to the same chat-group flow
-# that `install.sh` reminds about. Goes to stderr AND the per-app log
-# (when one is reachable — we're called pre-LOG_DIR-default-resolution
-# in --validate-config, so we tolerate its absence).
+# Multi-line CP-actionable error pointing the CP MIS back to the
+# install-instructions email (the canonical credential delivery channel).
+# Goes to stderr AND the per-app log (when one is reachable — we're
+# called pre-LOG_DIR-default-resolution in --validate-config, so we
+# tolerate its absence).
 print_incomplete_config_error() {
     _conf="$1"
     _missing="$2"
@@ -166,15 +167,15 @@ auto-certs: config $_conf is incomplete:
 
 To fix:
   1. Open the file in an editor:  sudo \$EDITOR $_conf
-  2. Paste the values from your per-app chat group into the empty lines:
+  2. Paste the values from the install-instructions email into the
+     empty lines:
        API_TOKEN=...
        BUNDLE_PASSWORD=...
   3. Save and re-run:
        sudo /opt/auto-certs/launcher.sh --once --app <app_code>
 
-Note: secrets are NOT accepted on the command line — they would leak
-into ~/.bash_history and \`ps aux\`. They live at-rest in this 0600
-file only.
+Note: launcher.sh does not accept secrets on the command line. They
+live at-rest in this 0600 file only.
 ERR
 }
 
