@@ -1,10 +1,8 @@
 # auto-certs shell client
 
-This is `auto_certs.sh`, the POSIX-`sh` client that game CPs install on their hosts to keep their TLS certs current. It polls the auto-certs server (run by xforce-games), downloads new bundles, atomically installs them, runs the CP's reload hook, and reports the outcome back to the server.
+This directory holds `auto_certs.sh`, the POSIX-`sh` client that game CPs install on their hosts to keep their TLS certs current. It polls the auto-certs server, downloads new bundles, atomically installs them, runs the CP's reload hook, and reports the outcome back to the server.
 
-This repository is the **public mirror** of the client tree. The CP's MIS team should be able to read this entire repo in under 30 minutes and convince themselves there is no backdoor or smuggled diagnostic.
-
-See [SECURITY.md](SECURITY.md) for cryptographic verification of releases (Sigstore/cosign-keyless + SLSA build provenance + SPDX SBOM).
+> **Status (2026-04-30)**: in-tree development per CLAUDE.md. Public GitHub migration is the [release gate to first CP onboarding](../CLAUDE.md). Develop here, prove it works, sign artifacts, then move.
 
 ## Quick start (for CP MIS reading this before installing)
 
@@ -98,37 +96,41 @@ The `install.sh` script itself runs fine on CentOS 6; only the bootstrap-fetch n
 ## Repo layout
 
 ```
-README.md           ← this file
-install.sh          ← installer (Step 1) — only --app on the command line
-launcher.sh         ← ≤50-line POSIX sh; locates payload, integrity-checks, execs (Step 2)
-payload/
-  VERSION           ← single-line semver
-  auto_certs.sh     ← main entry point (Step 3+)
-  lib/
-    common.sh       ← logging, redaction, timeout wrapper
-    http.sh         ← curl+wget abstraction
-    crypto.sh       ← openssl wrappers (sig verify, decrypt, x509)
-    atomic.sh       ← atomic mv-T helpers
-    report.sh       ← report-back assembly + redaction
-    server-pubkey.pem ← pinned at install (never auto-rotates)
-reload.sh.placeholder ← explanatory comments + `exit 1` body
-conf.d/
-  example.conf.template ← annotated config template; install.sh substitutes
-                          __APP_CODE__ / __BASE_DOMAIN__ / __SERVER_URL__ to
-                          produce the per-app placeholder conf
-LICENSE             ← Apache-2.0
-SECURITY.md         ← signing + verification recipes for release artifacts
+client/
+  README.md           ← this file
+  install.sh          ← one-line installer (Step 1)
+  launcher.sh         ← ≤50-line POSIX sh; locates payload, integrity-checks, execs (Step 2)
+  payload/
+    VERSION           ← single-line semver
+    auto_certs.sh     ← main entry point (Step 3+)
+    lib/
+      common.sh       ← logging, redaction, timeout wrapper
+      http.sh         ← curl+wget abstraction
+      crypto.sh       ← openssl wrappers (sig verify, decrypt, x509)
+      atomic.sh       ← atomic mv-T helpers
+      report.sh       ← report-back assembly + redaction
+      report_send.sh  ← POST /api/v1/report with retry/queue
+      server-pubkey.pem ← pinned at install (never auto-rotates)
+  reload.sh.placeholder ← explanatory comments + `exit 1` body
+  conf.d/
+    example.conf.template ← annotated config template; install.sh substitutes
+                            __APP_CODE__ / __BASE_DOMAIN__ / __SERVER_URL__ to
+                            produce the per-app placeholder conf
+  test/
+    run_all.sh        ← top-level test runner
+    mock_server.sh    ← Python/nc-based mock for /api/v1/*
+    live_e2e.sh       ← manual e2e against dev API
+    fixtures/         ← sample bundles + payloads
 ```
 
-## Operating constraints
+## Operating constraints (CLAUDE.md gives the full picture)
 
-These shape every line of code in this repo:
-
-- **POSIX `sh` only** — no bashisms (`[[ ]]`, `${var,,}`, `<<<`, arrays, `function`, `local`). Tested on CentOS 6/7, Ubuntu, and other Linuxes that ship a non-bash `/bin/sh`.
+- **POSIX `sh` only** in production code — no bashisms (`[[ ]]`, `${var,,}`, `<<<`, arrays, `function`, `local`).
 - **Standard small toolset**: `openssl`, `curl` *or* `wget`, `tar`, `mv`, `mktemp`, `sha256sum` (with `shasum -a 256` fallback), `awk`, `grep`, `sed`, `cut`, `tr`. No `jq`, no `systemctl`, no GNU-specific flags.
-- **CentOS 6 `openssl` is 1.0.1e** — no `enc -pbkdf2` flag. The server pre-derives the AES key via PBKDF2 and ships salt + IV + ciphertext; the client just runs `openssl enc -aes-256-cbc -d -K <hex> -iv <hex>`.
+- **CentOS 6 `openssl` is 1.0.1e** — no `enc -pbkdf2` flag, no `kdf` subcommand. Envelope v2 (`v0.3.0-rc1`, 2026-05-02) uses single-pass HMAC-SHA256 KDF via `openssl dgst -sha256 -hmac` (in 1.0.0+ since March 2010); the client computes the same key from `(password, salt)` the server used and runs `openssl enc -aes-256-cbc -d -K <hex> -iv <hex>`. End-to-end empirically verified on `canary-centos6` (CentOS 6.8 / OpenSSL 1.0.1e-fips). Full rationale: [`docs/research/centos6-compatibility.md`](../docs/research/centos6-compatibility.md).
 - **Standard `unzip` does NOT decrypt AES ZIPs** — we don't ship ZIP. The bundle is `tar` + `openssl enc`.
 - **Detached signature verification is HARD pre-condition on decrypt**. The pinned RSA-4096 public key in `payload/lib/server-pubkey.pem` verifies the server's signature on the encrypted envelope BEFORE we attempt decrypt.
-- **No auto-rollback on reload-hook failure**. New bundle stays on disk; old in-memory cert keeps serving until something reloads. Failure is reported back; xforce-games operators handle manually.
+- **No auto-rollback on reload-hook failure**. New bundle stays on disk; old in-memory cert keeps serving until something reloads. Failure is reported back; MIS handles manually.
 - **Source must be auditable in <30 minutes by a non-expert sysadmin**. No clever tricks. No minification. Plain shell.
-- **Whatever code runs is plainly visible in this repo.** Nothing is fetched at runtime that isn't part of a signed release.
+
+See [docs/plans/phase-4-shell-client.md](../docs/plans/phase-4-shell-client.md) for the full implementation plan.

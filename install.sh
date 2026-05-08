@@ -162,9 +162,14 @@ case "$APP_CODE" in
         ;;
 esac
 
-# Default base_domain auto-derived from --app (per_app convention).
-# Recorded in the placeholder conf; CP can override post-install for
-# delegated-CNAME / custom-domain setups.
+# Default base_domain auto-derived from --app — `<app_code>.wakool.net` IS
+# the per_app convention, and recording it as the placeholder example helps
+# CP MIS recognise the typical shape. The line lands COMMENTED OUT in the
+# placeholder conf; CPs who need to OVERRIDE the server's value (delegated
+# CNAME / custom-domain setups) uncomment + edit. Issuance uses
+# `apps.base_domain` directly (§81 regression test pins this), not a
+# recomputed default — so even if the placeholder differs from the actual
+# base_domain (shared / custom CPs), the runtime path is correct.
 BASE_DOMAIN_DEFAULT="${APP_CODE}.wakool.net"
 
 # ---- preflight ----------------------------------------------------------

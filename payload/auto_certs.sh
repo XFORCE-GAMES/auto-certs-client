@@ -288,6 +288,12 @@ process_app() {
     # Compute current bundle hash (if any).
     _current_hash=$(compute_local_bundle_hash "$CERT_DIR" || echo "")
 
+    # JKS Phase B: also compute the local jks_hash if a keystore is
+    # installed. Empty string when the conf doesn't enable JKS or no
+    # keystore has been delivered yet — server treats either as
+    # "client doesn't have it" and emits extras.jks.
+    _current_jks_hash=$(compute_local_jks_hash "$CERT_DIR" || echo "")
+
     phase_event "check_started"
 
     # Call /api/v1/check.
@@ -314,7 +320,9 @@ process_app() {
     echo "X-Auto-Certs-Running-Ref: $_running_ref" > "$_hdr_file"
 
     _tmp=$(mktemp)
-    _check_url="${SERVER_URL}/api/v1/check?machine_uuid=$(cat "$MACHINE_ID_PATH")&hash=${_current_hash}"
+    # JKS Phase B (rc15+): include jks_hash query parameter so server can
+    # gate extras.jks emission. Pre-rc15 servers ignore unknown params.
+    _check_url="${SERVER_URL}/api/v1/check?machine_uuid=$(cat "$MACHINE_ID_PATH")&hash=${_current_hash}&jks_hash=${_current_jks_hash}"
     if ! http_get "$_check_url" "$_tmp" "$API_TOKEN" "$_hdr_file"; then
         log_error "/check failed (network or HTTP error)"
         phase_event "check_failed" "network or HTTP error"
@@ -364,9 +372,29 @@ process_app() {
     # initially, this re-resolves to the right path here.)
     : "${CERT_DIR:=/etc/auto-certs/$BASE_DOMAIN}"
 
+    # Extract optional extras.jks block (JKS Phase B). May be present
+    # with EITHER status:current OR status:update per PLAN.jks.md
+    # §4.2.2 6-row matrix.
+    _jks_url=""
+    _jks_hash=""
+    case "$_resp" in
+        *'"jks":{'*)
+            _jks_hash=$(echo "$_resp" | sed -nE 's/.*"jks":\{"hash":"([0-9a-f]{64})".*/\1/p')
+            _jks_url=$(echo "$_resp" | sed -nE 's/.*"jks":\{"hash":"[0-9a-f]+","url":"([^"]+)".*/\1/p')
+            ;;
+    esac
+
     # Crude JSON parse — POSIX sh doesn't have jq.
     case "$_resp" in
         *'"status":"current"'*)
+            if [ -n "$_jks_url" ] && [ -n "$_jks_hash" ]; then
+                # JKS-only update path: PEM unchanged, server says
+                # client's JKS is stale. Fetch only the keystore.
+                log_info "$APP_CODE: PEM current; JKS update available (hash=${_jks_hash})"
+                phase_event "jks_only_update"
+                process_jks_only_update "$_jks_url" "$_jks_hash" "$_current_hash"
+                return $?
+            fi
             log_info "$APP_CODE: bundle is current; no update needed"
             phase_event "current"
             return 0
@@ -389,7 +417,10 @@ process_app() {
     fi
 
     log_info "update available: bundle_hash=${_new_hash}"
-    process_update "$_dl_url" "$_new_hash"
+    if [ -n "$_jks_url" ] && [ -n "$_jks_hash" ]; then
+        log_info "  + JKS update available (hash=${_jks_hash})"
+    fi
+    process_update "$_dl_url" "$_new_hash" "$_jks_url" "$_jks_hash"
     return $?
 }
 
@@ -411,12 +442,219 @@ compute_local_bundle_hash() {
     fi
 }
 
+# JKS Phase B. Read the locally-stamped jks_hash, written at install
+# time alongside keystore.jks. Same approach as compute_local_bundle_hash:
+# we don't try to derive the hash from the file bytes (HMAC-keyed by
+# a password we don't have on the client side anyway). Server pinned
+# the hash at /check time; we record it on disk and read it back.
+compute_local_jks_hash() {
+    _dir="$1"
+    if [ -r "$_dir/.jks_hash" ]; then
+        head -n 1 "$_dir/.jks_hash" | tr -d '\r\n '
+    else
+        echo ""
+    fi
+}
+
+# JKS Phase B — fetch keystore.jks from /api/v1/download/jks/<token>,
+# verify signature, decrypt envelope, write to <staging>/keystore.jks
+# AND stamp <staging>/.jks_hash. On any failure, returns non-zero AND
+# emits a failure report. The caller bails before atomic_install so
+# PEM doesn't commit either.
+#
+# Args:
+#   $1 — extras.jks.url
+#   $2 — expected jks_hash (server-pinned at /check time)
+#   $3 — _work dir (workspace; envelope.bin lands here)
+#   $4 — _staging dir (where keystore.jks + .jks_hash MUST land)
+#   $5 — _expected_pem_hash (for failure-report context)
+fetch_and_stage_jks() {
+    _jks_dl="$1"
+    _expected_jks_hash="$2"
+    _work_dir="$3"
+    _stg="$4"
+    _pem_hash="$5"
+
+    _jks_envelope="${_work_dir}/keystore.bin"
+    _jks_sigfile="${_work_dir}/keystore.sig"
+
+    phase_event "jks_download_started"
+    if ! http_get "$_jks_dl" "$_jks_envelope" "$API_TOKEN"; then
+        log_error "JKS download failed"
+        phase_event "jks_download_failed" "network error"
+        emit_failure "$_pem_hash" "/download/jks request failed" "$FC_NETWORK" "" ""
+        return 1
+    fi
+    phase_event "jks_download_completed"
+
+    # Per-response X-Bundle-Hash + X-Signature.
+    _jks_sig_b64=$(http_header_value "${_jks_envelope}.headers" "X-Signature")
+    _jks_resp_hash=$(http_header_value "${_jks_envelope}.headers" "X-Bundle-Hash")
+    if [ -z "$_jks_sig_b64" ] || [ -z "$_jks_resp_hash" ]; then
+        log_error "JKS download missing X-Signature or X-Bundle-Hash"
+        emit_failure "$_pem_hash" "JKS X-* headers missing" "$FC_INTEGRITY" "" ""
+        return 1
+    fi
+
+    # Layer 1: hash echo check — server's response header should match
+    # what /check told the client to expect. Mismatch indicates a server
+    # bug or a sophisticated rollback attack on /check.
+    if [ "$_jks_resp_hash" != "$_expected_jks_hash" ]; then
+        log_error "JKS X-Bundle-Hash mismatch (got=${_jks_resp_hash}, expected=${_expected_jks_hash})"
+        emit_failure "$_pem_hash" "JKS hash echo mismatch" "$FC_INTEGRITY" "" ""
+        return 1
+    fi
+
+    # Decode signature.
+    printf "%s" "$_jks_sig_b64" | base64 -d > "$_jks_sigfile" 2>/dev/null || \
+        printf "%s" "$_jks_sig_b64" | openssl base64 -d -A > "$_jks_sigfile" 2>/dev/null || {
+            log_error "could not base64-decode JKS X-Signature"
+            emit_failure "$_pem_hash" "bad JKS X-Signature" "$FC_INTEGRITY" "" ""
+            return 1
+        }
+
+    # Layer 2: RSA-4096 detached signature verify (HARD pre-condition).
+    if ! verify_signature "$_jks_envelope" "$_jks_sigfile" "$PUBKEY_FILE"; then
+        log_error "JKS signature verification FAILED — refusing to decrypt"
+        phase_event "jks_signature_failed"
+        emit_failure "$_pem_hash" "JKS signature verify failed" "$FC_INTEGRITY" "" ""
+        return 1
+    fi
+    phase_event "jks_signature_ok"
+
+    # Decrypt the envelope → keystore bytes.
+    if ! decrypt_envelope "$_jks_envelope" "$BUNDLE_PASSWORD" "${_stg}/keystore.jks"; then
+        log_error "JKS decrypt FAILED"
+        emit_failure "$_pem_hash" "JKS decrypt failed" "$FC_INTEGRITY" "" ""
+        return 1
+    fi
+    phase_event "jks_decrypt_ok"
+
+    # NOTE: we don't sha256 the keystore bytes for verification — keytool
+    # output is non-deterministic (timestamp + random PBE salt). Server
+    # signature + hash-echo check above are the integrity layers.
+    # Per PLAN.jks.md §4.7 implementation note 1.
+
+    # Stamp the jks_hash so next tick can short-circuit.
+    printf "%s\n" "$_expected_jks_hash" > "${_stg}/.jks_hash"
+    return 0
+}
+
+# JKS-only update: PEM is current on disk, but extras.jks said the
+# keystore is stale. Stage a copy of the live CERT_DIR plus the new
+# keystore.jks, then atomic_install.
+#
+# Args:
+#   $1 — extras.jks.url
+#   $2 — expected jks_hash
+#   $3 — current PEM bundle_hash (for failure-report context only)
+process_jks_only_update() {
+    _jks_url="$1"
+    _jks_hash="$2"
+    _pem_hash="$3"
+
+    # Same staging-on-same-fs discipline as process_update.
+    _cert_parent=$(dirname "$CERT_DIR")
+    mkdir -p "$_cert_parent" 2>/dev/null || true
+    if _work=$(mktemp -d "${_cert_parent}/.auto-certs-staging.XXXXXX" 2>/dev/null); then
+        :
+    else
+        _work=$(mktemp -d)
+        log_warn "JKS-only staging fell back to tmpfs"
+    fi
+    _staging="$_work/staging"
+    mkdir -p "$_staging"
+
+    _cleanup() { rm -rf "$_work" 2>/dev/null || true; }
+
+    # Copy live PEM files into staging so atomic_install's dir-rename
+    # swap preserves them. Empty-CERT_DIR case is impossible here
+    # because /check returned status:current (PEM is on disk).
+    if ! cp -p "$CERT_DIR"/. "$_staging/" 2>/dev/null; then
+        # POSIX `cp /dir/. dst/` is the GNU way; for portability use a
+        # plain glob.
+        for _f in "$CERT_DIR"/* "$CERT_DIR"/.bundle_hash; do
+            [ -e "$_f" ] || continue
+            cp -p "$_f" "$_staging/" 2>/dev/null || {
+                log_error "could not copy live $_f to staging"
+                emit_failure "$_pem_hash" "JKS-only staging copy failed" "$FC_OTHER" "" ""
+                _cleanup
+                return 1
+            }
+        done
+    fi
+
+    # Now fetch + stage keystore.
+    if ! fetch_and_stage_jks "$_jks_url" "$_jks_hash" "$_work" "$_staging" "$_pem_hash"; then
+        _cleanup
+        return 1
+    fi
+
+    # Atomic install (replaces CERT_DIR with PEM-copied + new keystore).
+    if ! atomic_install "$_staging" "$CERT_DIR"; then
+        emit_failure "$_pem_hash" "JKS-only atomic_install failed" "$FC_OTHER" "" ""
+        _cleanup
+        return 1
+    fi
+    phase_event "atomic_install_ok"
+
+    # Run reload hook so the JVM stack picks up the new keystore.
+    _hook_log="$_work/hook.log"
+    AUTO_CERTS_APP_CODE="$APP_CODE" \
+    AUTO_CERTS_BASE_DOMAIN="$BASE_DOMAIN" \
+    AUTO_CERTS_CERT_DIR="$CERT_DIR" \
+    AUTO_CERTS_PREVIOUS_DIR="${CERT_DIR}.previous" \
+    AUTO_CERTS_BUNDLE_HAS_JKS=1 \
+        run_with_timeout "$HOOK_TIMEOUT_SECONDS" "$HOOK_PATH" >"$_hook_log" 2>&1
+    _hook_rc=$?
+    _hook_output=$(tail -n 50 "$_hook_log" 2>/dev/null || echo "")
+    if [ "$_hook_rc" -ne 0 ]; then
+        log_error "reload hook (JKS-only update) exited $_hook_rc"
+        phase_event "reload_hook_failed" "exit=$_hook_rc"
+        emit_failure "$_pem_hash" "JKS-only reload hook exit $_hook_rc" "$FC_RELOAD_HOOK" "$_hook_output" ""
+        _cleanup
+        return 1
+    fi
+    phase_event "reload_hook_ok"
+
+    # Report success. Use the PEM bundle_hash (unchanged) as the report
+    # key — this is a "still on cert N, just refreshed JKS" event.
+    _payload_file=$(mktemp)
+    build_report_payload "$_payload_file" "$_pem_hash" "true" "" "" "$_hook_output" '{"jks_only":"true"}'
+    send_report "$_payload_file" "$QUEUE_DIR" || true
+    rm -f "$_payload_file" "${_payload_file}.resp" 2>/dev/null || true
+
+    _cleanup
+    return 0
+}
+
 # Process an "update" response from /check.
+#
+# Args:
+#   $1 — PEM download URL (required)
+#   $2 — expected PEM bundle_hash (required)
+#   $3 — JKS download URL (optional; empty when no extras.jks)
+#   $4 — expected JKS hash (optional; empty when no extras.jks)
 process_update() {
     _dl_url="$1"
     _expected_hash="$2"
+    _jks_url="${3:-}"
+    _jks_hash="${4:-}"
 
-    _work=$(mktemp -d)
+    # IMPORTANT for atomic_install: $_work MUST be on the SAME
+    # filesystem as $CERT_DIR for the atomic-mv-of-staging to be
+    # atomic at the kernel level. tmpfs vs persistent-disk crossover
+    # silently degrades to copy+unlink.
+    # Per PLAN.jks.md §4.9: stage under the parent of $CERT_DIR.
+    _cert_parent=$(dirname "$CERT_DIR")
+    mkdir -p "$_cert_parent" 2>/dev/null || true
+    if _work=$(mktemp -d "${_cert_parent}/.auto-certs-staging.XXXXXX" 2>/dev/null); then
+        :
+    else
+        # Fallback: tmpfs is fine for a worktree but log it.
+        _work=$(mktemp -d)
+        log_warn "staging fell back to tmpfs (mktemp under ${_cert_parent} failed) — atomic_install may degrade to copy+unlink across mounts"
+    fi
     _envelope="$_work/envelope.bin"
     _tar="$_work/bundle.tar"
     _staging="$_work/staging"
@@ -505,6 +743,24 @@ process_update() {
     # 6. Stamp the bundle hash so next tick can compare without re-deriving.
     printf "%s\n" "$_expected_hash" > "$_staging/.bundle_hash"
 
+    # 6.5 JKS Phase B — if the /check response carried extras.jks, fetch
+    # and stage keystore.jks alongside the PEM files. Stage-both-then-
+    # commit semantics: any failure here aborts the whole install
+    # (PEM doesn't atomic_install either). Per PLAN.jks.md §4.7.
+    #
+    # If the conf file has bundle_format_jks=0 OR the local keystore
+    # was unwanted, $_jks_url is empty and we skip. If a keystore was
+    # previously installed and the operator turned JKS off server-side,
+    # the old keystore stays on disk (we DON'T delete — could brick
+    # the JVM that's still consuming it).
+    if [ -n "$_jks_url" ] && [ -n "$_jks_hash" ]; then
+        if ! fetch_and_stage_jks "$_jks_url" "$_jks_hash" "$_work" "$_staging" "$_expected_hash"; then
+            _cleanup
+            return 1
+        fi
+        phase_event "jks_staged"
+    fi
+
     # 7. Atomic install.
     if ! atomic_install "$_staging" "$CERT_DIR"; then
         emit_failure "$_expected_hash" "atomic_install failed" "$FC_OTHER" "" ""
@@ -513,12 +769,20 @@ process_update() {
     fi
     phase_event "atomic_install_ok"
 
-    # 8. Run reload hook.
+    # 8. Run reload hook. Pass AUTO_CERTS_BUNDLE_HAS_JKS=1 when this
+    # cycle installed a keystore (additive env var per PLAN.jks.md
+    # §4.8). Hook can branch on it to restart the JVM stack.
     _hook_log="$_work/hook.log"
+    if [ -n "${_jks_url:-}" ]; then
+        _hook_jks_env="AUTO_CERTS_BUNDLE_HAS_JKS=1"
+    else
+        _hook_jks_env=""
+    fi
     AUTO_CERTS_APP_CODE="$APP_CODE" \
     AUTO_CERTS_BASE_DOMAIN="$BASE_DOMAIN" \
     AUTO_CERTS_CERT_DIR="$CERT_DIR" \
     AUTO_CERTS_PREVIOUS_DIR="${CERT_DIR}.previous" \
+    ${_hook_jks_env} \
         run_with_timeout "$HOOK_TIMEOUT_SECONDS" "$HOOK_PATH" >"$_hook_log" 2>&1
     _hook_rc=$?
     _hook_output=$(tail -n 50 "$_hook_log" 2>/dev/null || echo "")

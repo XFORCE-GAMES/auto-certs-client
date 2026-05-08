@@ -136,7 +136,7 @@ build_report_payload() {
     _err_esc=$(printf "%s"  "$_error"       | redact | json_escape_stdin)
     _hook_esc=$(printf "%s" "$_hook_output" | redact | json_escape_stdin)
 
-    # NOTE: pre-rc11 this had `_tls_compact="${_tls_result:-{}}"`. POSIX
+    # NOTE: pre-§66 this had `_tls_compact="${_tls_result:-{}}"`. POSIX
     # `sh` ends the expansion at the FIRST `}`, so when _tls_result was
     # non-empty (the common case post-rc8 once tls_selftest started
     # returning real data), the expansion appended a stray `}` —
