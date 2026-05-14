@@ -207,26 +207,44 @@ if [ ! -x "$NEW_PAYLOAD_BIN" ]; then
     exit 0
 fi
 
-"$NEW_PAYLOAD_BIN" --self-check
-_selfcheck_rc=$?
+# `set -e` would abort on non-zero from --self-check; wrap in if/else
+# so we can inspect the exit code (rc=0 pass, rc=2 controlled-fail-stay,
+# anything else → revert).
+if "$NEW_PAYLOAD_BIN" --self-check; then
+    _selfcheck_rc=0
+else
+    _selfcheck_rc=$?
+fi
 
 if [ "$_selfcheck_rc" -eq 0 ]; then
     log_info "post-flip self-check PASS"
     exit 0
 fi
 
-# §102 (v0.4.0-rc3): exit code 2 = host-state-only fail (e.g. operator
-# hasn't edited /opt/auto-certs/reload.sh yet). Reverting wouldn't fix
-# the host state — it would just waste the install AND leave the
-# operator with a worse story ("which version is live now?"). Stay on
-# the new payload; the self-check report has already been POSTed so
-# server-side §99 dedup decides on the MIS alert.
+# §103 (v0.4.0-rc4): exit code 2 = controlled self-check fail (any
+# category — hook_placeholder, cert_dir_missing, missing tools, etc.).
+# Stay on the new payload.
+#
+# Principle: the update mechanism is the lifeline for fixing problems
+# in the field; it should almost always succeed. If --self-check
+# returned 2, the new payload was healthy enough to diagnose its
+# environment — that's "client is fine, host needs attention."
+# Server-side §99 / fleet-pattern detector / rollout state machine
+# handle the fail report.
+#
+# Auto-revert is reserved for the catastrophic case where the new
+# payload couldn't even reach the controlled rc=2 return — sh
+# syntax error, missing interpreter, signal kill, OOM. Those
+# produce uncontrolled exit codes (1, 127, 137, 139, …) caught by
+# the fallthrough `*)` branch below.
 if [ "$_selfcheck_rc" -eq 2 ]; then
-    log_info "post-flip self-check host-state-only FAIL on ${ASSIGNED}; staying (not reverting — host onboarding incomplete)"
+    log_info "post-flip self-check returned controlled-fail (rc=2) on ${ASSIGNED}; staying"
+    log_info "    (auto-revert reserved for uncontrolled exits — sh crash, missing interpreter, etc.)"
     exit 0
 fi
 
-log_error "post-flip self-check FAIL on ${ASSIGNED} (rc=${_selfcheck_rc}); attempting revert"
+log_error "post-flip self-check UNCONTROLLED FAIL on ${ASSIGNED} (rc=${_selfcheck_rc}); attempting revert"
+log_error "    (new payload likely broken — couldn't reach controlled rc=2 return)"
 
 # Empty .previous_target (first-install case): nothing to revert to.
 # The fail report has already been POSTed by --self-check itself.
@@ -260,29 +278,33 @@ log_info "reverted: now on ${CURRENT_TARGET} (failed target was ${ASSIGNED})"
 # we DO NOT loop — log + exit 0; the fail report from this re-exec lands
 # server-side as `failure_reason='revert_target_also_failed'`.
 #
-# §102 (v0.4.0-rc3): rc=2 on the revert target ALSO means host-state-
-# only (same reason classification as the post-flip check). Log it
-# distinctly — operator-MUST-intervene phrasing is reserved for actual
-# client breakage; "post-revert host-state fail" just means the host
-# was never fully onboarded and the same self-check categories were
-# tripped before the failed-target tick. No "DON'T LOOP" warning
-# either — there's nothing to loop on; we've already reverted.
+# §103 (v0.4.0-rc4): rc=2 on the revert target ALSO means a controlled
+# self-check fail (same as post-flip semantics — see above). Log it
+# distinctly — "operator MUST intervene" phrasing is reserved for
+# uncontrolled exits indicating a genuinely broken payload, not for
+# controlled host-state diagnostics. No "DON'T LOOP" warning either —
+# we've already reverted; there's nothing to loop on.
 PREV_PAYLOAD_BIN="${INSTALL_ROOT}/current/auto_certs.sh"
 if [ ! -x "$PREV_PAYLOAD_BIN" ]; then
     log_error "post-revert: ${PREV_PAYLOAD_BIN} not executable — operator MUST intervene"
     exit 0
 fi
-"$PREV_PAYLOAD_BIN" --self-check
-_revert_rc=$?
+# Same set -e wrapping as the post-flip check above.
+if "$PREV_PAYLOAD_BIN" --self-check; then
+    _revert_rc=0
+else
+    _revert_rc=$?
+fi
 case "$_revert_rc" in
     0)
         log_info "post-revert self-check PASS"
         ;;
     2)
-        log_info "post-revert self-check host-state-only FAIL on ${CURRENT_TARGET} (onboarding incomplete on this host)"
+        log_info "post-revert self-check returned controlled-fail (rc=2) on ${CURRENT_TARGET}"
+        log_info "    (host has same controlled categories pre- and post-revert — not a revert-failure signal)"
         ;;
     *)
-        log_error "post-revert self-check ALSO FAIL (rc=${_revert_rc}) — previous_target ${CURRENT_TARGET} is broken too"
+        log_error "post-revert self-check UNCONTROLLED FAIL (rc=${_revert_rc}) — previous_target ${CURRENT_TARGET} appears broken too"
         log_error "    operator MUST intervene; not looping further"
         ;;
 esac

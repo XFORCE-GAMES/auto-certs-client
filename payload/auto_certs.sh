@@ -949,29 +949,49 @@ run_self_check() {
 
     if [ -n "$_failures" ]; then
         log_error "self-check FAIL:$_failures"
-        # POST fail report FIRST, THEN return per-category exit code.
-        # §102 (v0.4.0-rc3): exit code discrimination —
-        #   1 = client-regression suspected → updater.sh reverts
-        #   2 = host-state-only fail (e.g. hook_placeholder)
-        #       → updater.sh STAYS on the new payload (reverting would
-        #         not fix the host state; the new payload is fine)
-        # The fail report is sent for BOTH cases — server-side §99
-        # then decides whether to fire the MIS alert.
+        # POST fail report FIRST, THEN return rc=2.
+        #
+        # §103 (v0.4.0-rc4): ALL controlled self-check failures return
+        # rc=2 → updater.sh stays on the new payload.
+        #
+        # Principle: the update mechanism is the lifeline for fixing
+        # problems in the field; it should almost always succeed.
+        # Auto-revert is reserved for cases where the new payload is
+        # so broken it CAN'T REACH this controlled return point — sh
+        # syntax error, missing interpreter, signal kill, OOM, etc.
+        # Those produce uncontrolled exit codes (1, 127, 137, 139,
+        # …); updater.sh treats anything non-(0|2) as catastrophic.
+        #
+        # Every current self-check failure category (hook_placeholder,
+        # cert_dir_missing, missing_openssl, no_http_client, …) is
+        # static HOST state — present before AND after a payload
+        # flip. Reverting doesn't fix any of them; it just wastes the
+        # install and leaves the operator with a worse diagnostic
+        # story. Empirically proven on test21 2026-05-14 with the rc2
+        # → rc3 dance: post-revert self-check tripped the same
+        # hook_placeholder because nothing on the host changed.
+        #
+        # Server-side §99 (ApiController::isKnownStateCanaryFailure)
+        # still classifies categories for MIS alert suppression —
+        # the lib/common.sh helper `classify_host_state_only` mirrors
+        # that set as documentation. It is no longer load-bearing
+        # for the client-side revert decision.
+        #
+        # Real client regressions are caught by:
+        #   1. The rollout state machine — pauses on any self-check
+        #      fail at canary stage. Operator sees `/admin/rollouts`
+        #      and decides.
+        #   2. Fleet-pattern detector — flags many hosts reporting
+        #      the same failure category in <1h.
+        #   3. Operator can manually revert per-host (SSH + symlink
+        #      flip) as an emergency. Never automated.
         _payload_file=$(mktemp)
         build_self_check_payload "$_payload_file" "fail" "$_new_version" \
             "$_previous_version" "self_check_failures:$_failures" "$_env_fp"
         send_self_check_report "$_payload_file" "$QUEUE_DIR" || true
         rm -f "$_payload_file" "${_payload_file}.resp" 2>/dev/null || true
-
-        # Trim leading space; classify_host_state_only expects a clean
-        # space-separated list. `$_failures` is built by appending
-        # " category" so it starts with a leading space.
-        _failures_trimmed=$(printf '%s' "$_failures" | sed -e 's/^ *//')
-        if classify_host_state_only "$_failures_trimmed"; then
-            log_info "self-check fail is host-state only (operator: complete onboarding); staying on $_new_version"
-            return 2
-        fi
-        return 1
+        log_info "self-check fail is controlled (categories:$_failures); staying on $_new_version"
+        return 2
     fi
 
     log_info "self-check OK"
