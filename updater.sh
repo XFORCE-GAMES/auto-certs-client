@@ -56,6 +56,48 @@ API_TOKEN=""; SERVER_URL=""
 . "$CONF_FILE"
 [ -n "$API_TOKEN" ] && [ -n "$SERVER_URL" ] || { log_warn "no API_TOKEN/SERVER_URL"; exit 0; }
 
+# §104 (v0.4.0-rc5): refresh the local CA bundle from our server before
+# any other network operations. Uses the CURRENT /opt/auto-certs/cacert
+# .pem to verify our server's cert — proper TLS verification, no TOFU
+# window post-install. Fail-open: any error keeps the existing bundle
+# rather than bricking the host. install-time TOFU (--insecure) is
+# only acceptable during initial install.sh; updater.sh runs in
+# steady-state where every cert chain MUST verify cleanly.
+INSTALLED_CACERT="${INSTALL_ROOT}/cacert.pem"
+refresh_cacert_bundle() {
+    if [ ! -f "$INSTALLED_CACERT" ]; then
+        # rc4-or-earlier host upgrading via cron: seed from bundled.
+        _bundled="${PAYLOAD_LIB}/cacert.pem"
+        if [ -r "$_bundled" ]; then
+            cp "$_bundled" "$INSTALLED_CACERT" 2>/dev/null || return 0
+            chmod 0644 "$INSTALLED_CACERT" 2>/dev/null || true
+            log_info "seeded $INSTALLED_CACERT from bundled payload (rc4→rc5 migration)"
+        else
+            return 0  # no bundled CA → nothing to seed
+        fi
+    fi
+    _new="${INSTALLED_CACERT}.new"
+    if curl --cacert "$INSTALLED_CACERT" -sSfL --connect-timeout 10 --max-time 60 \
+            -o "$_new" "${SERVER_URL%/}/cacert.pem" 2>/dev/null; then
+        _sz=$(wc -c < "$_new" 2>/dev/null || echo 0)
+        _cn=$(grep -c '-----BEGIN CERTIFICATE-----' "$_new" 2>/dev/null || echo 0)
+        if [ "$_sz" -gt 100000 ] && [ "$_cn" -gt 100 ]; then
+            mv "$_new" "$INSTALLED_CACERT"
+            chmod 0644 "$INSTALLED_CACERT" 2>/dev/null || true
+            # Don't log on success — silent steady-state is the goal.
+        else
+            log_warn "cacert.pem refresh validation failed (size=$_sz certs=$_cn); kept existing"
+            rm -f "$_new"
+        fi
+    else
+        # Network blip / server down / TLS verify fail — keep existing.
+        # No insecure fallback here (asymmetric vs install.sh): post-install,
+        # a TLS verify fail is a security event, not a degradation case.
+        rm -f "$_new" 2>/dev/null
+    fi
+}
+refresh_cacert_bundle
+
 LAUNCHER_TARGET_FILE="${INSTALL_ROOT}/.launcher_target"
 PREVIOUS_TARGET_FILE="${INSTALL_ROOT}/.previous_target"
 CURRENT_TARGET=$(head -n 1 "$LAUNCHER_TARGET_FILE" 2>/dev/null | tr -d '\r\n')

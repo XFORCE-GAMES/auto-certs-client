@@ -38,7 +38,17 @@ PUBKEY_FILE="$LIB_DIR/server-pubkey.pem"
 # as the system CA, so no platform-specific branching is needed.
 # http.sh checks $AUTO_CERTS_CACERT and uses it if readable; falls
 # through to system CA otherwise.
-export AUTO_CERTS_CACERT="$LIB_DIR/cacert.pem"
+# §104 (v0.4.0-rc5): prefer the cross-version, auto-refreshed bundle at
+# ${INSTALL_ROOT}/cacert.pem (written by install.sh on first install,
+# refreshed by updater.sh on every tick from /cacert.pem on our server).
+# Falls back to the payload-bundled cacert.pem for rc4-or-earlier installs
+# that didn't yet seed ${INSTALL_ROOT}/cacert.pem.
+_install_root="${AUTO_CERTS_INSTALL_ROOT:-/opt/auto-certs}"
+if [ -r "${_install_root}/cacert.pem" ]; then
+    export AUTO_CERTS_CACERT="${_install_root}/cacert.pem"
+else
+    export AUTO_CERTS_CACERT="$LIB_DIR/cacert.pem"
+fi
 
 # shellcheck disable=SC1091
 . "$LIB_DIR/common.sh"

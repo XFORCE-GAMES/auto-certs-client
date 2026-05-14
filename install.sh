@@ -207,15 +207,21 @@ done
 #      mid-transfer corruption + signed-but-misuploaded artifact mixups.
 #   5. Extract to a temp dir; set SOURCE_DIR to that.
 #
-# CentOS 6 / old-trust-store hosts:
-#   GitHub TLS doesn't validate against pre-2018 ca-certificates. For that
-#   case set AUTO_CERTS_INSECURE_BOOTSTRAP=1 — install.sh will use
-#   `curl --insecure` / `wget --no-check-certificate`. In that mode the
-#   SHA-256 check is the SOLE trust anchor; the CP MIS MUST verify the
-#   expected hash out-of-band against a trusted channel (e.g. the GitHub
-#   release page viewed from a modern browser, or a hash communicated
-#   out-of-band by the operator). See cp-onboarding-flow.md §"Special
-#   cases — CentOS 6 first-install bootstrap".
+# CentOS 6 / old-trust-store hosts (§104 auto-detect, v0.4.0-rc5):
+#   GitHub TLS doesn't validate against pre-2018 ca-certificates. Rather
+#   than make the operator know about + opt into a special flag, install.sh
+#   auto-detects via curl exit codes (60 / 35 / 51 / 58 / 77 = TLS-trust
+#   failure) and falls back to fetching a fresh Mozilla CA bundle from
+#   our own server (https://${SERVER_URL_HOST}/cacert.pem, refreshed daily
+#   from curl.se by the auto-certs server's cron). The bundle fetch itself
+#   is `--insecure` (TOFU same trust posture as the outer
+#   `curl --insecure ... install.sh | sh`), but every subsequent fetch
+#   uses `--cacert <bootstrap>` for proper TLS verification.
+#
+#   Manual override: AUTO_CERTS_INSECURE_BOOTSTRAP=1 — forces blanket
+#   --insecure on every fetch from the start (skips the secure attempt).
+#   Only useful for edge cases where even reaching our server requires
+#   --insecure first (e.g. weird MITM proxy).
 #
 # Override repo / release for testing:
 #   AUTO_CERTS_INSTALL_REPO    default: XFORCE-GAMES/auto-certs-client
@@ -228,15 +234,80 @@ if [ -z "$SOURCE_DIR" ]; then
     trap 'rm -rf "$BOOT_TMP"' EXIT INT TERM
     GH_REPO="${AUTO_CERTS_INSTALL_REPO:-XFORCE-GAMES/auto-certs-client}"
     INS_FLAG=""; WGET_INS=""
+    CACERT_FILE=""
+    BOOTSTRAP_TRIED=0
+    INSTALLED_CACERT="${INSTALL_ROOT}/cacert.pem"
     if [ "${AUTO_CERTS_INSECURE_BOOTSTRAP:-0}" = "1" ]; then
         INS_FLAG="--insecure"; WGET_INS="--no-check-certificate"
-        echo "auto-certs install: WARNING — bootstrap fetches use --insecure (AUTO_CERTS_INSECURE_BOOTSTRAP=1)." >&2
-        echo "  SHA-256 check is the SOLE trust anchor; expected-hash MUST come from a trusted channel." >&2
+        echo "auto-certs install: WARNING — AUTO_CERTS_INSECURE_BOOTSTRAP=1; all fetches use --insecure (legacy override)." >&2
     fi
+    # §104: try to bootstrap a fresh CA bundle from our server when system
+    # CA fails. Idempotent — only attempted once per install run.
+    _ac_try_bootstrap_cacert() {
+        BOOTSTRAP_TRIED=1
+        echo "" >&2
+        echo "=================================================================" >&2
+        echo "auto-certs install: system CA verification FAILED" >&2
+        echo "auto-certs install:   → fetching fresh CA bundle from ${SERVER_URL}/cacert.pem" >&2
+        echo "auto-certs install:   → TOFU posture (same trust as your outer" >&2
+        echo "auto-certs install:     curl --insecure install.sh | sh); subsequent" >&2
+        echo "auto-certs install:     fetches will use proper TLS verification" >&2
+        echo "=================================================================" >&2
+        _bootstrap_tmp="${BOOT_TMP}/cacert.pem.bootstrap"
+        if ! curl --insecure -sSfL --connect-timeout 10 --max-time 30 \
+                -o "$_bootstrap_tmp" "${SERVER_URL}/cacert.pem" 2>/dev/null; then
+            echo "auto-certs install: cacert bootstrap fetch FAILED" >&2
+            rm -f "$_bootstrap_tmp"
+            return 1
+        fi
+        # Shape validation: at least 100 CERTIFICATE blocks + 100KB.
+        _cn=$(grep -c '-----BEGIN CERTIFICATE-----' "$_bootstrap_tmp" 2>/dev/null || echo 0)
+        _sz=$(wc -c < "$_bootstrap_tmp" 2>/dev/null || echo 0)
+        if [ "$_cn" -lt 100 ] || [ "$_sz" -lt 100000 ]; then
+            echo "auto-certs install: bootstrap cacert validation FAILED (certs=$_cn, size=$_sz); refusing" >&2
+            rm -f "$_bootstrap_tmp"
+            return 1
+        fi
+        # Save to permanent location so the runtime (updater.sh + auto_certs.sh)
+        # uses it from here on.
+        mkdir -p "$(dirname "$INSTALLED_CACERT")" 2>/dev/null
+        if ! mv "$_bootstrap_tmp" "$INSTALLED_CACERT"; then
+            echo "auto-certs install: could not write $INSTALLED_CACERT" >&2
+            rm -f "$_bootstrap_tmp"
+            return 1
+        fi
+        chmod 0644 "$INSTALLED_CACERT" 2>/dev/null || true
+        CACERT_FILE="$INSTALLED_CACERT"
+        echo "auto-certs install: bootstrap CA ($_cn certs, $_sz bytes) saved to $INSTALLED_CACERT" >&2
+        echo "" >&2
+        return 0
+    }
     _ac_fetch() {  # _ac_fetch <url> <out>
         if command -v curl >/dev/null 2>&1; then
-            # shellcheck disable=SC2086  # INS_FLAG must word-split when set
-            curl -sSL --fail $INS_FLAG "$1" -o "$2"
+            # Build CA arg from current state.
+            _ca_arg=""
+            if [ -n "$CACERT_FILE" ] && [ -r "$CACERT_FILE" ]; then
+                _ca_arg="--cacert $CACERT_FILE"
+            elif [ -n "$INS_FLAG" ]; then
+                _ca_arg="$INS_FLAG"
+            fi
+            # shellcheck disable=SC2086  # _ca_arg must word-split
+            curl -sSL --fail $_ca_arg "$1" -o "$2"
+            _rc=$?
+            if [ "$_rc" -eq 0 ]; then return 0; fi
+            # §104: on TLS-trust failures, try to bootstrap a fresh CA
+            # bundle from our server (once), then retry.
+            case "$_rc" in
+                60|35|51|58|77)
+                    if [ "$BOOTSTRAP_TRIED" -eq 0 ] && [ -z "$CACERT_FILE" ] && [ -z "$INS_FLAG" ]; then
+                        if _ac_try_bootstrap_cacert; then
+                            curl -sSL --fail --cacert "$CACERT_FILE" "$1" -o "$2"
+                            return $?
+                        fi
+                    fi
+                    ;;
+            esac
+            return "$_rc"
         else
             # shellcheck disable=SC2086  # WGET_INS must word-split when set
             wget $WGET_INS -q -O "$2" "$1"
@@ -343,6 +414,17 @@ if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$PAYLOAD_DEST/auto_certs.sh" > "$PAYLOAD_DEST/auto_certs.sh.sha256"
 elif command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "$PAYLOAD_DEST/auto_certs.sh" > "$PAYLOAD_DEST/auto_certs.sh.sha256"
+fi
+
+# §104 (v0.4.0-rc5): seed /opt/auto-certs/cacert.pem if not already set up
+# by the bootstrap path. Modern hosts (where _ac_fetch succeeded with
+# system CA) didn't go through _ac_try_bootstrap_cacert, so the file
+# doesn't exist yet. Seed from the bundled payload so updater.sh has
+# something to refresh on the next tick.
+if [ ! -f "${INSTALL_ROOT}/cacert.pem" ] && [ -r "$PAYLOAD_DEST/lib/cacert.pem" ]; then
+    cp "$PAYLOAD_DEST/lib/cacert.pem" "${INSTALL_ROOT}/cacert.pem"
+    chmod 0644 "${INSTALL_ROOT}/cacert.pem" 2>/dev/null || true
+    echo "auto-certs install: seeded ${INSTALL_ROOT}/cacert.pem from bundled payload"
 fi
 
 # Atomic-flip the `current` symlink.
