@@ -617,13 +617,21 @@ process_jks_only_update() {
         phase_event "reload_hook_autochmod_failed" "path=$HOOK_PATH"
     fi
     _hook_log="$_work/hook.log"
-    AUTO_CERTS_APP_CODE="$APP_CODE" \
-    AUTO_CERTS_BASE_DOMAIN="$BASE_DOMAIN" \
-    AUTO_CERTS_CERT_DIR="$CERT_DIR" \
-    AUTO_CERTS_PREVIOUS_DIR="${CERT_DIR}.previous" \
-    AUTO_CERTS_BUNDLE_HAS_JKS=1 \
-        run_with_timeout "$HOOK_TIMEOUT_SECONDS" "$HOOK_PATH" >"$_hook_log" 2>&1
-    _hook_rc=$?
+    # §107 (v0.4.0-rc7): wrap in `if` so `set -e` (line 26) doesn't kill the
+    # parent shell when the hook exits non-zero — without this, the launcher
+    # silently exits after `atomic_install_ok` and the failure is invisible
+    # to both the local log and the server's report-back. Same pattern as
+    # the §103 updater.sh `set -e` fix.
+    if AUTO_CERTS_APP_CODE="$APP_CODE" \
+       AUTO_CERTS_BASE_DOMAIN="$BASE_DOMAIN" \
+       AUTO_CERTS_CERT_DIR="$CERT_DIR" \
+       AUTO_CERTS_PREVIOUS_DIR="${CERT_DIR}.previous" \
+       AUTO_CERTS_BUNDLE_HAS_JKS=1 \
+           run_with_timeout "$HOOK_TIMEOUT_SECONDS" "$HOOK_PATH" >"$_hook_log" 2>&1; then
+        _hook_rc=0
+    else
+        _hook_rc=$?
+    fi
     _hook_output=$(tail -n 50 "$_hook_log" 2>/dev/null || echo "")
     if [ "$_hook_rc" -ne 0 ]; then
         # §100 (v0.4.0-rc2): annotate the most common cause of exit 126
@@ -810,13 +818,21 @@ process_update() {
     else
         _hook_jks_env=""
     fi
-    AUTO_CERTS_APP_CODE="$APP_CODE" \
-    AUTO_CERTS_BASE_DOMAIN="$BASE_DOMAIN" \
-    AUTO_CERTS_CERT_DIR="$CERT_DIR" \
-    AUTO_CERTS_PREVIOUS_DIR="${CERT_DIR}.previous" \
-    ${_hook_jks_env} \
-        run_with_timeout "$HOOK_TIMEOUT_SECONDS" "$HOOK_PATH" >"$_hook_log" 2>&1
-    _hook_rc=$?
+    # §107 (v0.4.0-rc7): wrap in `if` so `set -e` (line 26) doesn't kill the
+    # parent shell when the hook exits non-zero — without this, the launcher
+    # silently exits after `atomic_install_ok` and the failure is invisible
+    # to both the local log and the server's report-back. Same pattern as
+    # the §103 updater.sh `set -e` fix. Drove the 2026-05-14 popstone diag.
+    if AUTO_CERTS_APP_CODE="$APP_CODE" \
+       AUTO_CERTS_BASE_DOMAIN="$BASE_DOMAIN" \
+       AUTO_CERTS_CERT_DIR="$CERT_DIR" \
+       AUTO_CERTS_PREVIOUS_DIR="${CERT_DIR}.previous" \
+       ${_hook_jks_env} \
+           run_with_timeout "$HOOK_TIMEOUT_SECONDS" "$HOOK_PATH" >"$_hook_log" 2>&1; then
+        _hook_rc=0
+    else
+        _hook_rc=$?
+    fi
     _hook_output=$(tail -n 50 "$_hook_log" 2>/dev/null || echo "")
     if [ "$_hook_rc" -ne 0 ]; then
         # §100 (v0.4.0-rc2): annotate the most common cause of exit 126
