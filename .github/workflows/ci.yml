@@ -88,7 +88,7 @@ jobs:
           payload_loc=$(cat payload/auto_certs.sh payload/lib/*.sh | wc -l)
           install_loc=$(wc -l < install.sh)
           echo "launcher.sh                         : $launcher_loc lines (cap: 80)"
-          echo "payload/auto_certs.sh + lib/*.sh    : $payload_loc lines (cap: 2050)"
+          echo "payload/auto_certs.sh + lib/*.sh    : $payload_loc lines (cap: 2120)"
           echo "install.sh                          : $install_loc lines (cap: 660)"
           fail=0
           [ "$launcher_loc" -le 80 ] || { echo "::error::launcher.sh exceeds cap"; fail=1; }
@@ -130,6 +130,6 @@ jobs:
           # Headroom is intentional — security fixes + functional features
           # shouldn't be gated by a cosmetic LOC cap. Bump again if future
           # fixes legitimately push past.
-          [ "$payload_loc"  -le 2050 ] || { echo "::error::payload total exceeds cap"; fail=1; }
+          [ "$payload_loc"  -le 2120 ] || { echo "::error::payload total exceeds cap"; fail=1; }
           [ "$install_loc"  -le 660 ] || { echo "::error::install.sh exceeds cap"; fail=1; }
           exit "$fail"
