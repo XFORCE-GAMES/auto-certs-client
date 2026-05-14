@@ -459,6 +459,22 @@ mv "$INSTALL_ROOT/.launcher_target.tmp" "$INSTALL_ROOT/.launcher_target"
 chmod 644 "$INSTALL_ROOT/.launcher_target" 2>/dev/null || true
 rm -f "$INSTALL_ROOT/.previous_target" 2>/dev/null || true
 
+# §108 (v0.4.0-rc8): drop `.install_intent` so the launcher's next
+# /api/v1/check call carries `X-Auto-Certs-Install-Intent: $TAG_VERSION`.
+# This is the explicit operator-intent signal — the server overwrites
+# `launcher_assignments.assigned_ref` for this machine on receipt,
+# regardless of any prior (paused-rollout, stale) assignment. The
+# launcher unlinks the file on a 2xx response so the header is
+# one-shot per manual install. PER-MACHINE (not per-app): every app
+# the launcher iterates over on the next tick will carry the header
+# until the first 2xx, then it's gone.
+#
+# Path is under $ETC_ROOT (not $INSTALL_ROOT) intentionally — it sits
+# next to `machine_id`, which is also per-machine and per-host.
+echo "$TAG_VERSION" > "$ETC_ROOT/.install_intent.tmp"
+mv "$ETC_ROOT/.install_intent.tmp" "$ETC_ROOT/.install_intent"
+chmod 0600 "$ETC_ROOT/.install_intent" 2>/dev/null || true
+
 # Drop placeholder reload.sh (only if absent — CP-editable post-install).
 HOOK_PATH_DEFAULT="${INSTALL_ROOT}/reload.sh"
 if [ ! -f "$HOOK_PATH_DEFAULT" ]; then

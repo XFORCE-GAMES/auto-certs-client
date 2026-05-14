@@ -329,6 +329,34 @@ process_app() {
     _hdr_file=$(mktemp)
     echo "X-Auto-Certs-Running-Ref: $_running_ref" > "$_hdr_file"
 
+    # §108 (v0.4.0-rc8): one-shot install-intent header. install.sh
+    # drops /etc/auto-certs/.install_intent with the version the
+    # operator just installed; the launcher reads it here and forwards
+    # to the server as X-Auto-Certs-Install-Intent. The server uses
+    # this as the authoritative declaration "this machine should be on
+    # this version" — overrides any stale assigned_ref from a paused
+    # rollout. After the /check returns 2xx (below) the file is
+    # unlinked so the header is sent at-most-once per manual install.
+    # Per-machine, not per-app: the very first app on the launcher's
+    # iteration carries it, after success the file is gone for
+    # subsequent apps' /check calls in the same tick.
+    # §108 intent file path: prefer the same $AUTO_CERTS_ETC_ROOT env
+    # install.sh honors (`${AUTO_CERTS_ETC_ROOT:-/etc/auto-certs}`).
+    # Fall back to `dirname $MACHINE_ID_PATH` for hosts where only
+    # AUTO_CERTS_MACHINE_ID is customized — the default-empty case
+    # resolves both paths to the same `/etc/auto-certs/` so this is a
+    # no-op in standard installs. Custom-env deployments need to set
+    # AUTO_CERTS_ETC_ROOT consistently between install.sh and the
+    # launcher's environment for the intent header to land.
+    _intent_path="${AUTO_CERTS_ETC_ROOT:-$(dirname "$MACHINE_ID_PATH")}/.install_intent"
+    _install_intent_value=""
+    if [ -r "$_intent_path" ]; then
+        _install_intent_value=$(head -n 1 "$_intent_path" | tr -d '\r\n')
+        if [ -n "$_install_intent_value" ]; then
+            echo "X-Auto-Certs-Install-Intent: $_install_intent_value" >> "$_hdr_file"
+        fi
+    fi
+
     _tmp=$(mktemp)
     # JKS Phase B (rc15+): include jks_hash query parameter so server can
     # gate extras.jks emission. Pre-rc15 servers ignore unknown params.
@@ -346,6 +374,17 @@ process_app() {
     fi
     rm -f "$_hdr_file" 2>/dev/null || true
     phase_event "check_completed"
+
+    # §108: /check returned 2xx, so the server has consumed the
+    # X-Auto-Certs-Install-Intent header (if sent). Unlink the file
+    # so the next tick (and all subsequent apps on this same tick)
+    # don't re-send it. If the file is absent / unreadable / wasn't
+    # set, this is a harmless no-op. We only unlink on success —
+    # network/HTTP failures above already `return 1` before this
+    # point, leaving the file for the next tick to retry.
+    if [ -n "$_install_intent_value" ]; then
+        rm -f "$_intent_path" 2>/dev/null || true
+    fi
 
     _resp=$(cat "$_tmp" 2>/dev/null || echo "{}")
     rm -f "$_tmp" "${_tmp}.headers" 2>/dev/null || true
