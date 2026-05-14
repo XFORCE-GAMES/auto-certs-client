@@ -88,7 +88,7 @@ jobs:
           payload_loc=$(cat payload/auto_certs.sh payload/lib/*.sh | wc -l)
           install_loc=$(wc -l < install.sh)
           echo "launcher.sh                         : $launcher_loc lines (cap: 80)"
-          echo "payload/auto_certs.sh + lib/*.sh    : $payload_loc lines (cap: 1900)"
+          echo "payload/auto_certs.sh + lib/*.sh    : $payload_loc lines (cap: 1960)"
           echo "install.sh                          : $install_loc lines (cap: 600)"
           fail=0
           [ "$launcher_loc" -le 80 ] || { echo "::error::launcher.sh exceeds cap"; fail=1; }
@@ -102,6 +102,11 @@ jobs:
           # across compute_local_jks_hash, fetch_and_stage_jks,
           # process_jks_only_update, response parse, and same-fs
           # staging discipline.
+          # Cap bumped 1900→1960 in v0.4.0-rc2 (auto-certs server
+          # CHANGELOG §100) for the ensure_hook_executable helper
+          # (~30 LOC in lib/common.sh + ~13 LOC × 2 call sites for
+          # invocation + exit-126 hint blocks in auto_certs.sh). Net
+          # ~56 LOC; 1938 measured; 1960 leaves modest headroom.
           # install.sh cap bumped 400→500 in v0.3.0-rc9 to accommodate the
           # auto-fetch implementation (CHANGELOG §47): when --source-dir
           # is not given, install.sh discovers the latest release via the
@@ -116,6 +121,6 @@ jobs:
           # Headroom is intentional — security fixes + functional features
           # shouldn't be gated by a cosmetic LOC cap. Bump again if future
           # fixes legitimately push past.
-          [ "$payload_loc"  -le 1900 ] || { echo "::error::payload total exceeds cap"; fail=1; }
+          [ "$payload_loc"  -le 1960 ] || { echo "::error::payload total exceeds cap"; fail=1; }
           [ "$install_loc"  -le 600 ] || { echo "::error::install.sh exceeds cap"; fail=1; }
           exit "$fail"
