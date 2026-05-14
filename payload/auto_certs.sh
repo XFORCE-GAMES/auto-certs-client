@@ -949,13 +949,28 @@ run_self_check() {
 
     if [ -n "$_failures" ]; then
         log_error "self-check FAIL:$_failures"
-        # POST fail report FIRST, THEN return non-zero so updater.sh
-        # knows to revert.
+        # POST fail report FIRST, THEN return per-category exit code.
+        # §102 (v0.4.0-rc3): exit code discrimination —
+        #   1 = client-regression suspected → updater.sh reverts
+        #   2 = host-state-only fail (e.g. hook_placeholder)
+        #       → updater.sh STAYS on the new payload (reverting would
+        #         not fix the host state; the new payload is fine)
+        # The fail report is sent for BOTH cases — server-side §99
+        # then decides whether to fire the MIS alert.
         _payload_file=$(mktemp)
         build_self_check_payload "$_payload_file" "fail" "$_new_version" \
             "$_previous_version" "self_check_failures:$_failures" "$_env_fp"
         send_self_check_report "$_payload_file" "$QUEUE_DIR" || true
         rm -f "$_payload_file" "${_payload_file}.resp" 2>/dev/null || true
+
+        # Trim leading space; classify_host_state_only expects a clean
+        # space-separated list. `$_failures` is built by appending
+        # " category" so it starts with a leading space.
+        _failures_trimmed=$(printf '%s' "$_failures" | sed -e 's/^ *//')
+        if classify_host_state_only "$_failures_trimmed"; then
+            log_info "self-check fail is host-state only (operator: complete onboarding); staying on $_new_version"
+            return 2
+        fi
         return 1
     fi
 
@@ -970,15 +985,28 @@ run_self_check() {
 }
 
 # ---- main loop ---------------------------------------------------------
+#
+# §102 (v0.4.0-rc3): aggregate per-app rc with precedence:
+#   1 (revert) beats 2 (stay) beats 0 (pass).
+#
+# Reasoning: if ANY app's self-check returns 1 (client-regression
+# suspected), we want updater.sh to revert — even if another app
+# returned 2 (host-state-only). Conversely, if all apps return 0 or 2,
+# we stay on the new payload (no client regression detected).
 _overall_rc=0
 _apps_processed=0
 for _conf in "$CONF_DIR"/*.conf; do
     [ -r "$_conf" ] || continue
     _apps_processed=$((_apps_processed + 1))
-    # Each app's failure is isolated — ( ... ) || true semantics.
-    if ! ( process_app "$_conf" ); then
-        _overall_rc=1
-    fi
+    # Each app's failure is isolated — subshell so a `set -e` inside
+    # `process_app` can't bring down the loop.
+    ( process_app "$_conf" )
+    _app_rc=$?
+    case "$_app_rc" in
+        0) ;;
+        2) [ "$_overall_rc" -eq 0 ] && _overall_rc=2 ;;
+        *) _overall_rc=1 ;;   # any non-zero non-2 → revert
+    esac
 done
 if [ "$_apps_processed" -eq 0 ]; then
     echo "auto-certs: no configs in $CONF_DIR" >&2

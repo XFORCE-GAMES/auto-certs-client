@@ -207,12 +207,26 @@ if [ ! -x "$NEW_PAYLOAD_BIN" ]; then
     exit 0
 fi
 
-if "$NEW_PAYLOAD_BIN" --self-check; then
+"$NEW_PAYLOAD_BIN" --self-check
+_selfcheck_rc=$?
+
+if [ "$_selfcheck_rc" -eq 0 ]; then
     log_info "post-flip self-check PASS"
     exit 0
 fi
 
-log_error "post-flip self-check FAIL on ${ASSIGNED}; attempting revert"
+# §102 (v0.4.0-rc3): exit code 2 = host-state-only fail (e.g. operator
+# hasn't edited /opt/auto-certs/reload.sh yet). Reverting wouldn't fix
+# the host state — it would just waste the install AND leave the
+# operator with a worse story ("which version is live now?"). Stay on
+# the new payload; the self-check report has already been POSTed so
+# server-side §99 dedup decides on the MIS alert.
+if [ "$_selfcheck_rc" -eq 2 ]; then
+    log_info "post-flip self-check host-state-only FAIL on ${ASSIGNED}; staying (not reverting — host onboarding incomplete)"
+    exit 0
+fi
+
+log_error "post-flip self-check FAIL on ${ASSIGNED} (rc=${_selfcheck_rc}); attempting revert"
 
 # Empty .previous_target (first-install case): nothing to revert to.
 # The fail report has already been POSTed by --self-check itself.
@@ -245,12 +259,32 @@ log_info "reverted: now on ${CURRENT_TARGET} (failed target was ${ASSIGNED})"
 # Confirm the previous payload is healthy. If it ALSO fails self-check,
 # we DO NOT loop — log + exit 0; the fail report from this re-exec lands
 # server-side as `failure_reason='revert_target_also_failed'`.
+#
+# §102 (v0.4.0-rc3): rc=2 on the revert target ALSO means host-state-
+# only (same reason classification as the post-flip check). Log it
+# distinctly — operator-MUST-intervene phrasing is reserved for actual
+# client breakage; "post-revert host-state fail" just means the host
+# was never fully onboarded and the same self-check categories were
+# tripped before the failed-target tick. No "DON'T LOOP" warning
+# either — there's nothing to loop on; we've already reverted.
 PREV_PAYLOAD_BIN="${INSTALL_ROOT}/current/auto_certs.sh"
-if [ -x "$PREV_PAYLOAD_BIN" ] && "$PREV_PAYLOAD_BIN" --self-check; then
-    log_info "post-revert self-check PASS"
-else
-    log_error "post-revert self-check ALSO FAIL — previous_target ${CURRENT_TARGET} is broken too"
-    log_error "    operator MUST intervene; not looping further"
+if [ ! -x "$PREV_PAYLOAD_BIN" ]; then
+    log_error "post-revert: ${PREV_PAYLOAD_BIN} not executable — operator MUST intervene"
+    exit 0
 fi
+"$PREV_PAYLOAD_BIN" --self-check
+_revert_rc=$?
+case "$_revert_rc" in
+    0)
+        log_info "post-revert self-check PASS"
+        ;;
+    2)
+        log_info "post-revert self-check host-state-only FAIL on ${CURRENT_TARGET} (onboarding incomplete on this host)"
+        ;;
+    *)
+        log_error "post-revert self-check ALSO FAIL (rc=${_revert_rc}) — previous_target ${CURRENT_TARGET} is broken too"
+        log_error "    operator MUST intervene; not looping further"
+        ;;
+esac
 
 exit 0

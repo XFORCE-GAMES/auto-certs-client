@@ -142,6 +142,49 @@ ensure_hook_executable() {
     return 1
 }
 
+# §102 (v0.4.0-rc3): classify a self-check failure list as
+# "host-state-only" (operator-onboarding-incomplete) vs anything else.
+#
+# Background: post-flip self-check fail historically triggered an
+# auto-revert of the client payload. But categories like
+# `hook_placeholder` (CP hasn't edited the reload hook) and
+# `cert_dir_missing` (cert dir was never created) are STATIC host
+# state — present BEFORE the flip AND AFTER. Reverting doesn't fix
+# them; it just wastes the install + leaves the operator in a worse
+# diagnostic position ("which version is live now?"). Mirrors the
+# server-side §99 ApiController::isKnownStateCanaryFailure gate so
+# the "suppress alert" and "skip revert" predicates agree.
+#
+# Usage: classify_host_state_only "<space-separated failure list>"
+# Returns 0 (true, host-state-only) when every category is in the
+# known onboarding-incomplete set. Returns 1 (false) on:
+#   - empty input (defensive — caller should not pass empty)
+#   - any category outside the known set (default to safer-revert)
+#
+# Known-host-state set (mirrors server-side §99 + §99.4):
+#   - hook_placeholder              : operator hasn't edited the hook
+#   - hook_missing_or_not_exec      : hook file missing or !+x
+#                                     (§100 auto-chmod handles the +x
+#                                     case before we reach self-check;
+#                                     this remains for hook-deleted)
+#   - cert_dir_missing              : cert dir never created (fresh
+#                                     host that hasn't completed first
+#                                     download cycle yet)
+classify_host_state_only() {
+    _list="${1:-}"
+    [ -z "$_list" ] && return 1
+    for _f in $_list; do
+        case "$_f" in
+            hook_placeholder|hook_missing_or_not_exec|cert_dir_missing)
+                : ;;  # known onboarding-incomplete, continue
+            *)
+                return 1  # client-regression candidate or unknown — revert
+                ;;
+        esac
+    done
+    return 0
+}
+
 # Generic SHA-256 wrapper. Falls back to shasum if sha256sum absent.
 sha256_of() {
     _f="$1"
