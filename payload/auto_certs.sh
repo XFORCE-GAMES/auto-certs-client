@@ -599,6 +599,13 @@ process_jks_only_update() {
     phase_event "atomic_install_ok"
 
     # Run reload hook so the JVM stack picks up the new keystore.
+    # §100 (v0.4.0-rc2): auto-fix missing +x bit on the hook so an
+    # otherwise-edited hook doesn't fail the rollout with exit 126.
+    if ensure_hook_executable "$HOOK_PATH"; then
+        :
+    else
+        phase_event "reload_hook_autochmod_failed" "path=$HOOK_PATH"
+    fi
     _hook_log="$_work/hook.log"
     AUTO_CERTS_APP_CODE="$APP_CODE" \
     AUTO_CERTS_BASE_DOMAIN="$BASE_DOMAIN" \
@@ -609,9 +616,16 @@ process_jks_only_update() {
     _hook_rc=$?
     _hook_output=$(tail -n 50 "$_hook_log" 2>/dev/null || echo "")
     if [ "$_hook_rc" -ne 0 ]; then
-        log_error "reload hook (JKS-only update) exited $_hook_rc"
+        # §100 (v0.4.0-rc2): annotate the most common cause of exit 126
+        # in failure_reason so MIS sees an actionable hint in the alert.
+        if [ "$_hook_rc" -eq 126 ] && [ -f "$HOOK_PATH" ] && [ ! -x "$HOOK_PATH" ]; then
+            _hook_hint=" (hint: chmod +x $HOOK_PATH — file exists but not executable)"
+        else
+            _hook_hint=""
+        fi
+        log_error "reload hook (JKS-only update) exited $_hook_rc$_hook_hint"
         phase_event "reload_hook_failed" "exit=$_hook_rc"
-        emit_failure "$_pem_hash" "JKS-only reload hook exit $_hook_rc" "$FC_RELOAD_HOOK" "$_hook_output" ""
+        emit_failure "$_pem_hash" "JKS-only reload hook exit $_hook_rc$_hook_hint" "$FC_RELOAD_HOOK" "$_hook_output" ""
         _cleanup
         return 1
     fi
@@ -772,6 +786,14 @@ process_update() {
     # 8. Run reload hook. Pass AUTO_CERTS_BUNDLE_HAS_JKS=1 when this
     # cycle installed a keystore (additive env var per PLAN.jks.md
     # §4.8). Hook can branch on it to restart the JVM stack.
+    #
+    # §100 (v0.4.0-rc2): auto-fix missing +x bit on the hook so an
+    # otherwise-edited hook doesn't fail the rollout with exit 126.
+    if ensure_hook_executable "$HOOK_PATH"; then
+        :
+    else
+        phase_event "reload_hook_autochmod_failed" "path=$HOOK_PATH"
+    fi
     _hook_log="$_work/hook.log"
     if [ -n "${_jks_url:-}" ]; then
         _hook_jks_env="AUTO_CERTS_BUNDLE_HAS_JKS=1"
@@ -787,9 +809,16 @@ process_update() {
     _hook_rc=$?
     _hook_output=$(tail -n 50 "$_hook_log" 2>/dev/null || echo "")
     if [ "$_hook_rc" -ne 0 ]; then
-        log_error "reload hook exited $_hook_rc"
+        # §100 (v0.4.0-rc2): annotate the most common cause of exit 126
+        # in failure_reason so MIS sees an actionable hint in the alert.
+        if [ "$_hook_rc" -eq 126 ] && [ -f "$HOOK_PATH" ] && [ ! -x "$HOOK_PATH" ]; then
+            _hook_hint=" (hint: chmod +x $HOOK_PATH — file exists but not executable)"
+        else
+            _hook_hint=""
+        fi
+        log_error "reload hook exited $_hook_rc$_hook_hint"
         phase_event "reload_hook_failed" "exit=$_hook_rc"
-        emit_failure "$_expected_hash" "reload hook exit $_hook_rc" "$FC_RELOAD_HOOK" "$_hook_output" ""
+        emit_failure "$_expected_hash" "reload hook exit $_hook_rc$_hook_hint" "$FC_RELOAD_HOOK" "$_hook_output" ""
         _cleanup
         return 1
     fi

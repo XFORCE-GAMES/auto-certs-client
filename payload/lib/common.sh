@@ -107,6 +107,41 @@ ensure_machine_uuid() {
     return 0
 }
 
+# §100 (v0.4.0-rc2): auto-fix the most common operator misstep when
+# customizing the reload hook — file edited but `chmod +x` forgotten.
+# Without this, the launcher invocation fails with exit 126 ("found
+# but not executable") which surfaces as a noisy MIS alert that's
+# resolved by a one-line shell command.
+#
+# Safety: by the time we call this, self-check has already gated the
+# placeholder content separately (failure_reason='hook_placeholder' if
+# the hook is still the unedited shipped placeholder), so reaching
+# here means the operator has edited the file content. Auto-`chmod +x`
+# is preserving their clear intent, not silently changing semantics.
+#
+# Returns 0 if the file is executable after the call (or was already);
+# returns 1 if the file is missing or `chmod +x` failed (read-only
+# fs, immutable bit, etc.). Caller should still proceed with the
+# invocation in case (1) — the subsequent run_with_timeout will fail
+# with a meaningful exit code that we annotate downstream.
+#
+# Usage: ensure_hook_executable "$HOOK_PATH"
+ensure_hook_executable() {
+    _hook="$1"
+    if [ ! -f "$_hook" ]; then
+        return 1   # missing file; let the invocation fail naturally
+    fi
+    if [ -x "$_hook" ]; then
+        return 0   # already executable; common path
+    fi
+    log_warn "reload hook not executable; auto-chmod +x on $_hook"
+    if chmod +x "$_hook" 2>/dev/null; then
+        return 0
+    fi
+    log_warn "auto-chmod failed on $_hook (read-only fs? immutable bit?); reload will likely fail with exit 126"
+    return 1
+}
+
 # Generic SHA-256 wrapper. Falls back to shasum if sha256sum absent.
 sha256_of() {
     _f="$1"
