@@ -80,7 +80,9 @@ refresh_cacert_bundle() {
     if curl --cacert "$INSTALLED_CACERT" -sSfL --connect-timeout 10 --max-time 60 \
             -o "$_new" "${SERVER_URL%/}/cacert.pem" 2>/dev/null; then
         _sz=$(wc -c < "$_new" 2>/dev/null || echo 0)
-        _cn=$(grep -c '-----BEGIN CERTIFICATE-----' "$_new" 2>/dev/null || echo 0)
+        # §105 (v0.4.0-rc6): no leading-dash pattern (CentOS 6 grep
+        # treats it as flags — see install.sh _ac_try_bootstrap_cacert).
+        _cn=$(grep -c 'BEGIN CERTIFICATE' "$_new" 2>/dev/null || echo 0)
         if [ "$_sz" -gt 100000 ] && [ "$_cn" -gt 100 ]; then
             mv "$_new" "$INSTALLED_CACERT"
             chmod 0644 "$INSTALLED_CACERT" 2>/dev/null || true

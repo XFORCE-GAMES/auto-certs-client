@@ -261,7 +261,13 @@ if [ -z "$SOURCE_DIR" ]; then
             return 1
         fi
         # Shape validation: at least 100 CERTIFICATE blocks + 100KB.
-        _cn=$(grep -c '-----BEGIN CERTIFICATE-----' "$_bootstrap_tmp" 2>/dev/null || echo 0)
+        # §105 (v0.4.0-rc6): grep pattern must NOT start with `-` —
+        # CentOS 6's grep (from 2010) interprets `-----BEGIN CERTIFICATE-----`
+        # as command-line flags rather than the search pattern. The shorter
+        # `BEGIN CERTIFICATE` matches the same lines (every line that's
+        # "-----BEGIN CERTIFICATE-----" contains "BEGIN CERTIFICATE") and
+        # doesn't trigger the leading-dash quirk on any grep version.
+        _cn=$(grep -c 'BEGIN CERTIFICATE' "$_bootstrap_tmp" 2>/dev/null || echo 0)
         _sz=$(wc -c < "$_bootstrap_tmp" 2>/dev/null || echo 0)
         if [ "$_cn" -lt 100 ] || [ "$_sz" -lt 100000 ]; then
             echo "auto-certs install: bootstrap cacert validation FAILED (certs=$_cn, size=$_sz); refusing" >&2
