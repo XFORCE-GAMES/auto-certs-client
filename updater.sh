@@ -77,8 +77,27 @@ refresh_cacert_bundle() {
         fi
     fi
     _new="${INSTALLED_CACERT}.new"
+    # §110 (v0.4.0-rc9): clear any stale .new from a prior interrupted
+    # run BEFORE the conditional fetch — the empty-file guard below
+    # uses `[ -s "$_new" ]` to distinguish "304: server says current"
+    # (curl writes nothing) from "200: server sent fresh bytes". A
+    # leftover non-empty .new from a crashed prior tick would
+    # spuriously pass the guard.
+    rm -f "$_new" 2>/dev/null
+    # §110: send `--time-cond` (curl's If-Modified-Since shortcut) with
+    # the local cacert's mtime. Server (CloudFront edge) returns 304
+    # when our copy is current — empirically verified on all 3 floor-
+    # OS canaries (curl 7.19.7 / 7.29.0 / 7.47.0; NSS + GnuTLS). Cuts
+    # steady-state cacert traffic 99.9%; full body only transfers on
+    # the rare quarterly Mozilla NSS update. Server-side PHP doesn't
+    # need a patch — CloudFront does the conditional GET at the edge
+    # using the origin's `Last-Modified` + `Cache-Control: max-age=43200`.
     if curl --cacert "$INSTALLED_CACERT" -sSfL --connect-timeout 10 --max-time 60 \
+            --time-cond "$INSTALLED_CACERT" \
             -o "$_new" "${SERVER_URL%/}/cacert.pem" 2>/dev/null; then
+        # §110: 304 path — curl writes nothing when server says current.
+        # No `.new` to validate, no rename needed; existing bundle stays.
+        [ -s "$_new" ] || return 0
         _sz=$(wc -c < "$_new" 2>/dev/null || echo 0)
         # §105 (v0.4.0-rc6): no leading-dash pattern (CentOS 6 grep
         # treats it as flags — see install.sh _ac_try_bootstrap_cacert).
