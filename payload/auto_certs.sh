@@ -661,16 +661,29 @@ process_jks_only_update() {
     # silently exits after `atomic_install_ok` and the failure is invisible
     # to both the local log and the server's report-back. Same pattern as
     # the §103 updater.sh `set -e` fix.
-    if AUTO_CERTS_APP_CODE="$APP_CODE" \
-       AUTO_CERTS_BASE_DOMAIN="$BASE_DOMAIN" \
-       AUTO_CERTS_CERT_DIR="$CERT_DIR" \
-       AUTO_CERTS_PREVIOUS_DIR="${CERT_DIR}.previous" \
-       AUTO_CERTS_BUNDLE_HAS_JKS=1 \
-           run_with_timeout "$HOOK_TIMEOUT_SECONDS" "$HOOK_PATH" >"$_hook_log" 2>&1; then
+    #
+    # §113 (v0.4.0-rc10): `VAR=val func` syntax sets VAR in the function's
+    # LOCAL scope only — POSIX does NOT export it to func's external
+    # children. So `AUTO_CERTS_APP_CODE="$APP_CODE" run_with_timeout
+    # /path/to/hook` leaves the hook seeing AUTO_CERTS_APP_CODE as UNSET
+    # (the hook then falls back to `${VAR:-default}`, masking the bug).
+    # Fix: explicit `export` before the call, `unset` after. Verified on
+    # dev VM: `VAR=val func` → grandchild sees unset; `export VAR; func`
+    # → grandchild sees the value. Latent on this JKS-only path since
+    # v0.3.0-rc1 (Phase 4) but invisible because the only hook writers
+    # in the wild (jljj/nyamusou) use the default cert path anyway.
+    export AUTO_CERTS_APP_CODE="$APP_CODE"
+    export AUTO_CERTS_BASE_DOMAIN="$BASE_DOMAIN"
+    export AUTO_CERTS_CERT_DIR="$CERT_DIR"
+    export AUTO_CERTS_PREVIOUS_DIR="${CERT_DIR}.previous"
+    export AUTO_CERTS_BUNDLE_HAS_JKS=1
+    if run_with_timeout "$HOOK_TIMEOUT_SECONDS" "$HOOK_PATH" >"$_hook_log" 2>&1; then
         _hook_rc=0
     else
         _hook_rc=$?
     fi
+    unset AUTO_CERTS_APP_CODE AUTO_CERTS_BASE_DOMAIN AUTO_CERTS_CERT_DIR \
+          AUTO_CERTS_PREVIOUS_DIR AUTO_CERTS_BUNDLE_HAS_JKS
     _hook_output=$(tail -n 50 "$_hook_log" 2>/dev/null || echo "")
     if [ "$_hook_rc" -ne 0 ]; then
         # §100 (v0.4.0-rc2): annotate the most common cause of exit 126
@@ -852,26 +865,52 @@ process_update() {
         phase_event "reload_hook_autochmod_failed" "path=$HOOK_PATH"
     fi
     _hook_log="$_work/hook.log"
-    if [ -n "${_jks_url:-}" ]; then
-        _hook_jks_env="AUTO_CERTS_BUNDLE_HAS_JKS=1"
-    else
-        _hook_jks_env=""
-    fi
     # §107 (v0.4.0-rc7): wrap in `if` so `set -e` (line 26) doesn't kill the
     # parent shell when the hook exits non-zero — without this, the launcher
     # silently exits after `atomic_install_ok` and the failure is invisible
     # to both the local log and the server's report-back. Same pattern as
     # the §103 updater.sh `set -e` fix. Drove the 2026-05-14 popstone diag.
-    if AUTO_CERTS_APP_CODE="$APP_CODE" \
-       AUTO_CERTS_BASE_DOMAIN="$BASE_DOMAIN" \
-       AUTO_CERTS_CERT_DIR="$CERT_DIR" \
-       AUTO_CERTS_PREVIOUS_DIR="${CERT_DIR}.previous" \
-       ${_hook_jks_env} \
-           run_with_timeout "$HOOK_TIMEOUT_SECONDS" "$HOOK_PATH" >"$_hook_log" 2>&1; then
+    #
+    # §113 (v0.4.0-rc10): TWO bugs fixed at this site simultaneously:
+    #
+    # 1. The previous `${_hook_jks_env}` expansion was placed in
+    #    env-var-prefix position — but POSIX only recognizes
+    #    variable-assignment prefix on LITERAL `WORD=WORD` source text,
+    #    NOT on tokens produced by expansion. So `${_hook_jks_env}`
+    #    expanding to `AUTO_CERTS_BUNDLE_HAS_JKS=1` made the shell try
+    #    to exec a command LITERALLY NAMED `AUTO_CERTS_BUNDLE_HAS_JKS=1`
+    #    → not found → exit 127. Only fired on JKS-on apps. Latent
+    #    since v0.4.0-rc1 (§92 multi-step JKS) and surfaced 2026-05-15
+    #    when jljj became the first CP exercising the JKS reload path
+    #    end-to-end. Captured server-side as
+    #    `auto_certs.sh: line 865: AUTO_CERTS_BUNDLE_HAS_JKS=1:
+    #     command not found` in client_update_log.hook_output.
+    # 2. `VAR=val func` syntax sets VAR in the function's LOCAL scope
+    #    only — POSIX does NOT export it to func's external children.
+    #    The hook never received AUTO_CERTS_* vars; the only reason
+    #    no CP noticed is that hooks use `${VAR:-default}` fallbacks
+    #    that happen to match the launcher's defaults.
+    #
+    # Fix: explicit `export` before the call + `unset` after. Verified
+    # on dev VM: `VAR=val func` → grandchild sees unset; `export VAR;
+    # func` → grandchild sees the value. `unset` is required because
+    # the launcher iterates apps in one process (per CLAUDE.md "the
+    # launcher iterates over all enabled app configs on each cron
+    # tick") — without it, app A's env leaks into app B.
+    export AUTO_CERTS_APP_CODE="$APP_CODE"
+    export AUTO_CERTS_BASE_DOMAIN="$BASE_DOMAIN"
+    export AUTO_CERTS_CERT_DIR="$CERT_DIR"
+    export AUTO_CERTS_PREVIOUS_DIR="${CERT_DIR}.previous"
+    if [ -n "${_jks_url:-}" ]; then
+        export AUTO_CERTS_BUNDLE_HAS_JKS=1
+    fi
+    if run_with_timeout "$HOOK_TIMEOUT_SECONDS" "$HOOK_PATH" >"$_hook_log" 2>&1; then
         _hook_rc=0
     else
         _hook_rc=$?
     fi
+    unset AUTO_CERTS_APP_CODE AUTO_CERTS_BASE_DOMAIN AUTO_CERTS_CERT_DIR \
+          AUTO_CERTS_PREVIOUS_DIR AUTO_CERTS_BUNDLE_HAS_JKS
     _hook_output=$(tail -n 50 "$_hook_log" 2>/dev/null || echo "")
     if [ "$_hook_rc" -ne 0 ]; then
         # §100 (v0.4.0-rc2): annotate the most common cause of exit 126
