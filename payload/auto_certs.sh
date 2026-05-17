@@ -1112,33 +1112,46 @@ run_self_check() {
 
     if [ -n "$_failures" ]; then
         log_error "self-check FAIL:$_failures"
-        # POST fail report FIRST, THEN return rc=2.
+        # POST fail report FIRST, THEN decide the launcher-stay exit code.
         #
-        # §103 (v0.4.0-rc4): ALL controlled self-check failures return
-        # rc=2 → updater.sh stays on the new payload.
+        # §103 (v0.4.0-rc4) introduced rc=2 as the "controlled fail / stay"
+        # signal, and updater.sh's post-flip handler treats rc=2 as "stay
+        # on new payload". On paper that handles every current failure
+        # category. In the field, popstone-1ca839d5 still thrashed nightly
+        # for 3 nights (rc1/rc10/rc11 each reverted) — its
+        # **installer-era updater.sh** (from the original `install.sh` run)
+        # mishandles rc=2 and reverts on hook_placeholder regardless of
+        # what the new payload signals. launcher.sh + updater.sh are
+        # installed ONCE per host and don't get auto-updated by the
+        # rolling payload flip, so we cannot rely on the launcher-side
+        # rc=2 behavior on existing hosts. The only way out is for the
+        # PAYLOAD to return rc=0 (universally-honored "pass") on the
+        # categories where staying is unambiguously correct.
         #
-        # Principle: the update mechanism is the lifeline for fixing
-        # problems in the field; it should almost always succeed.
-        # Auto-revert is reserved for cases where the new payload is
-        # so broken it CAN'T REACH this controlled return point — sh
-        # syntax error, missing interpreter, signal kill, OOM, etc.
-        # Those produce uncontrolled exit codes (1, 127, 137, 139,
-        # …); updater.sh treats anything non-(0|2) as catastrophic.
+        # §116 (v0.4.0-rc12): host-state-only failures
+        # (`hook_placeholder`, `hook_missing_or_not_exec`,
+        # `cert_dir_missing`) return rc=0. Reverting the payload never
+        # fixes them — they're CP-side onboarding gaps or fresh-host
+        # transients that are identical pre- and post-flip. The fail
+        # report has already POSTed above, so the server-side §99
+        # AlertSink, /admin/rollouts dashboard, fleet-pattern detector,
+        # and rollout state machine all still see the failure; only
+        # the launcher revert decision changes. MIS chases the CP via
+        # the per-app chat group exactly as before.
         #
-        # Every current self-check failure category (hook_placeholder,
-        # cert_dir_missing, missing_openssl, no_http_client, …) is
-        # static HOST state — present before AND after a payload
-        # flip. Reverting doesn't fix any of them; it just wastes the
-        # install and leaves the operator with a worse diagnostic
-        # story. Empirically proven on test21 2026-05-14 with the rc2
-        # → rc3 dance: post-revert self-check tripped the same
-        # hook_placeholder because nothing on the host changed.
+        # Non-host-state categories (`missing_openssl`, `no_http_client`,
+        # …) keep rc=2: the host is genuinely broken in a way that
+        # affects both the new and old payloads equally, so an older
+        # buggy updater.sh reverting on rc=2 is no worse than staying.
+        # rc11+ updater.sh stays on rc=2 per §103.
         #
-        # Server-side §99 (ApiController::isKnownStateCanaryFailure)
-        # still classifies categories for MIS alert suppression —
-        # the lib/common.sh helper `classify_host_state_only` mirrors
-        # that set as documentation. It is no longer load-bearing
-        # for the client-side revert decision.
+        # Principle (unchanged from §103): the update mechanism is the
+        # lifeline for fixing problems in the field; it should almost
+        # always succeed. Auto-revert is reserved for cases where the
+        # new payload is so broken it CAN'T REACH a controlled return
+        # point — sh syntax error, missing interpreter, signal kill,
+        # OOM, etc. Those produce uncontrolled exit codes (1, 127, 137,
+        # 139, …); updater.sh treats anything non-(0|2) as catastrophic.
         #
         # Real client regressions are caught by:
         #   1. The rollout state machine — pauses on any self-check
@@ -1153,6 +1166,10 @@ run_self_check() {
             "$_previous_version" "self_check_failures:$_failures" "$_env_fp"
         send_self_check_report "$_payload_file" "$QUEUE_DIR" || true
         rm -f "$_payload_file" "${_payload_file}.resp" 2>/dev/null || true
+        if classify_host_state_only "$_failures"; then
+            log_info "self-check failures are host-state-only ($_failures); update is not blocked, staying on $_new_version"
+            return 0
+        fi
         log_info "self-check fail is controlled (categories:$_failures); staying on $_new_version"
         return 2
     fi
