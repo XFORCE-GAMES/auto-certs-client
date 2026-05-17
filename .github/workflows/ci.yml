@@ -88,7 +88,7 @@ jobs:
           payload_loc=$(cat payload/auto_certs.sh payload/lib/*.sh | wc -l)
           install_loc=$(wc -l < install.sh)
           echo "launcher.sh                         : $launcher_loc lines (cap: 80)"
-          echo "payload/auto_certs.sh + lib/*.sh    : $payload_loc lines (cap: 2150)"
+          echo "payload/auto_certs.sh + lib/*.sh    : $payload_loc lines (cap: 2250)"
           echo "install.sh                          : $install_loc lines (cap: 660)"
           fail=0
           [ "$launcher_loc" -le 80 ] || { echo "::error::launcher.sh exceeds cap"; fail=1; }
@@ -129,6 +129,29 @@ jobs:
           # apps). ~15 LOC code per site + ~30 LOC comment per site
           # = ~90 LOC total. 2133 measured; 2150 leaves headroom.
           # Drove the 2026-05-15 jljj exit-127 reload-hook investigation.
+          # Cap bumped 2150→2200 in v0.4.0-rc11 (auto-certs server
+          # CHANGELOG §115) for the THREE-part fix that restored §103
+          # stay-vs-revert + made self-check correct under §75 server-
+          # authoritative BASE_DOMAIN: (A) wrap main-loop subshell in
+          # if/else so outer set -eu doesn't kill the script on the
+          # subshell's non-zero return before _app_rc=$? captures;
+          # (B) cache server-authoritative BASE_DOMAIN to
+          # /var/lib/auto-certs/state/<app>/server_base_domain on
+          # /check, read on next launcher flip's self-check; (C) gate
+          # cert_dir_missing check on `[ -n "${BASE_DOMAIN:-}" ]` so
+          # §75-style minimal confs don't get false positives. New
+          # STATE_DIR global. Net ~54 LOC (mostly comments documenting
+          # the regression). 2187 measured; 2200 leaves headroom.
+          # Drove the 2026-05-17 jljj rc10-revert investigation —
+          # §103 had been silently broken since rc4 (2026-05-14).
+          # Cap bumped 2200→2250 same-day (rc11 post-review): adversarial
+          # review surfaced Issue 4 — Fix B-read should prefer cache OVER
+          # stale conf BASE_DOMAIN (popstone-shared → per_app migration
+          # scenario could false-pass self-check by testing the wrong
+          # CERT_DIR). Fix: cache always wins when present + log_warn
+          # when conf disagrees. Also added Issue 6 docstring section
+          # listing all four runtime state dirs. Net ~22 LOC; 2208
+          # measured; 2250 leaves headroom.
           # install.sh cap bumped 400→500 in v0.3.0-rc9 to accommodate the
           # auto-fetch implementation (CHANGELOG §47): when --source-dir
           # is not given, install.sh discovers the latest release via the
@@ -147,6 +170,6 @@ jobs:
           # Headroom is intentional — security fixes + functional features
           # shouldn't be gated by a cosmetic LOC cap. Bump again if future
           # fixes legitimately push past.
-          [ "$payload_loc"  -le 2150 ] || { echo "::error::payload total exceeds cap"; fail=1; }
+          [ "$payload_loc"  -le 2250 ] || { echo "::error::payload total exceeds cap"; fail=1; }
           [ "$install_loc"  -le 660 ] || { echo "::error::install.sh exceeds cap"; fail=1; }
           exit "$fail"

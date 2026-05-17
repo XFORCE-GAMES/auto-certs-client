@@ -22,6 +22,17 @@
 #     mktemp, sha256sum|shasum, awk, grep, sed, cut, tr
 #   - Reload hook is opaque to us (we just exec it)
 #   - NO auto-rollback — failure stays on disk + reports back
+#
+# Runtime state directories:
+#   - $CONF_DIR     (/etc/auto-certs/conf.d)        — per-app .conf files (CP-managed)
+#   - $LOG_DIR_BASE (/var/log/auto-certs)           — per-app rotating logs
+#   - $QUEUE_DIR    (/var/lib/auto-certs/queue)     — deferred-report queue
+#   - $STATE_DIR    (/var/lib/auto-certs/state)     — §115 per-app server-
+#                                                     authoritative BASE_DOMAIN
+#                                                     cache (cache wins over
+#                                                     conf-file BASE_DOMAIN
+#                                                     for self-check CERT_DIR
+#                                                     resolution)
 
 set -eu
 
@@ -66,6 +77,11 @@ CONF_DIR="${AUTO_CERTS_CONF_DIR:-/etc/auto-certs/conf.d}"
 LOG_DIR_BASE="${AUTO_CERTS_LOG_DIR:-/var/log/auto-certs}"
 QUEUE_DIR="${AUTO_CERTS_QUEUE_DIR:-/var/lib/auto-certs/queue}"
 MACHINE_ID_PATH="${AUTO_CERTS_MACHINE_ID:-/etc/auto-certs/machine_id}"
+# §115 (v0.4.0-rc11): per-app cache of server-authoritative BASE_DOMAIN,
+# written by process_app after every successful /check, read by process_app
+# before self-check. Lets self-check resolve CERT_DIR correctly even when
+# the conf file omits BASE_DOMAIN (the §75 server-authoritative pattern).
+STATE_DIR="${AUTO_CERTS_STATE_DIR:-/var/lib/auto-certs/state}"
 
 # ---- CLI parsing ---------------------------------------------------------
 MODE="run"
@@ -273,6 +289,30 @@ process_app() {
     : "${SERVER_URL:=https://auto-certs.xforce-games.com}"
     : "${HOOK_PATH:=/opt/auto-certs/reload.sh}"
     : "${LOG_DIR:=$LOG_DIR_BASE}"
+    # §115 (v0.4.0-rc11): always prefer the cached server-authoritative
+    # BASE_DOMAIN over the conf-file value. Cache is written by the
+    # previous successful /check (Fix B-write below); when it exists it
+    # is by definition newer + correct vs. whatever the conf-file says.
+    # The conf-file BASE_DOMAIN is purely a fallback for fresh installs
+    # (cache absent) or pre-§75 servers (which never return base_domain).
+    #
+    # Post-review (Issue 4) refinement: the original Fix B-read only
+    # consulted cache when conf-file BASE_DOMAIN was empty. That left
+    # a false-negative-PASS hole for hosts whose conf carries a STALE
+    # BASE_DOMAIN (popstone-shared → per_app migration scenario) — the
+    # stale conf value won + self-check tested the wrong CERT_DIR + got
+    # a misleading pass. Cache-always-wins eliminates that hole.
+    _bd_cache="$STATE_DIR/$APP_CODE/server_base_domain"
+    if [ -r "$_bd_cache" ]; then
+        _cached_bd=$(head -n 1 "$_bd_cache" 2>/dev/null | tr -d '\r\n')
+        if [ -n "$_cached_bd" ]; then
+            if [ -n "${BASE_DOMAIN:-}" ] && [ "$BASE_DOMAIN" != "$_cached_bd" ]; then
+                log_warn "conf BASE_DOMAIN ($BASE_DOMAIN) differs from cached server value ($_cached_bd) — using cached"
+            fi
+            BASE_DOMAIN="$_cached_bd"
+        fi
+    fi
+
     # Tentative CERT_DIR for the pre-/check hash compute. Only used if
     # CERT_DIR isn't explicitly set in the conf AND BASE_DOMAIN is set
     # there. Re-resolved authoritatively after /check.
@@ -406,6 +446,14 @@ process_app() {
             log_warn "conf BASE_DOMAIN ($BASE_DOMAIN) differs from server's ($_server_base_domain) — using server value"
         fi
         BASE_DOMAIN="$_server_base_domain"
+        # §115 (v0.4.0-rc11): cache server-authoritative BASE_DOMAIN so the
+        # NEXT launcher-flip's --self-check (which runs BEFORE /check on the
+        # new payload) can resolve CERT_DIR without depending on a conf-file
+        # BASE_DOMAIN field. Best-effort: a read-only or full filesystem
+        # silently skips the write rather than failing the whole tick.
+        _bd_cache_dir="$STATE_DIR/$APP_CODE"
+        mkdir -p "$_bd_cache_dir" 2>/dev/null || true
+        printf '%s\n' "$BASE_DOMAIN" > "$_bd_cache_dir/server_base_domain" 2>/dev/null || true
     fi
     # Final guard: SOMETHING must have provided base_domain. If neither
     # the conf nor the server did, we can't proceed (no CERT_DIR target,
@@ -1031,7 +1079,18 @@ run_self_check() {
     log_info "$APP_CODE: self-check (new_version=${_new_version})"
 
     _failures=""
-    if [ ! -d "$CERT_DIR" ]; then
+    # §115 (v0.4.0-rc11): only flag cert_dir_missing when BASE_DOMAIN is
+    # locally known. Post-§75 the server is authoritative for BASE_DOMAIN
+    # (returned by /api/v1/check); the conf-file field is OPTIONAL. If the
+    # conf omits BASE_DOMAIN AND we have no cached server value (Fix B at
+    # process_app), self-check runs before /check can populate it — and
+    # CERT_DIR would be empty, generating a false-positive cert_dir_missing.
+    # The cert_dir is verified by the regular /check + /download flow
+    # regardless (mkdir at install time); deferring the check here is safe.
+    # Surfaced by jljj 2026-05-17: conf had APP_CODE but no BASE_DOMAIN,
+    # self-check on rc10 reported cert_dir_missing while the cert was happily
+    # landing at /etc/auto-certs/cyzgame.wakool.net/ via the regular path.
+    if [ -n "${BASE_DOMAIN:-}" ] && [ ! -d "$CERT_DIR" ]; then
         _failures="${_failures} cert_dir_missing"
     fi
     if [ ! -x "$HOOK_PATH" ]; then
@@ -1124,8 +1183,24 @@ for _conf in "$CONF_DIR"/*.conf; do
     _apps_processed=$((_apps_processed + 1))
     # Each app's failure is isolated — subshell so a `set -e` inside
     # `process_app` can't bring down the loop.
-    ( process_app "$_conf" )
-    _app_rc=$?
+    #
+    # §115 (v0.4.0-rc11): wrap the subshell call in `if` so the SUBSHELL's
+    # own non-zero return doesn't trigger the OUTER `set -e` (line 26)
+    # before _app_rc=$? can capture the code. Without this wrap,
+    # run_self_check's `return 2` (controlled stay-on-new per §103)
+    # propagates up through the subshell → outer set -e fires → script
+    # exits 1 → updater.sh interprets as "uncontrolled fail" and reverts.
+    # This silently broke §103 stay-vs-revert for every controlled-fail
+    # host (cert_dir_missing / hook_placeholder / missing-tool) from rc4
+    # (2026-05-14) through rc10. The §107 fix added the same wrap-pattern
+    # at the reload hook call sites but missed this main-loop call site.
+    # Surfaced empirically on jljj 2026-05-17 (rc10 revert despite the
+    # payload's own log line "self-check fail is controlled ... staying").
+    if ( process_app "$_conf" ); then
+        _app_rc=0
+    else
+        _app_rc=$?
+    fi
     case "$_app_rc" in
         0) ;;
         2) [ "$_overall_rc" -eq 0 ] && _overall_rc=2 ;;
