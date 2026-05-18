@@ -83,6 +83,33 @@ MACHINE_ID_PATH="${AUTO_CERTS_MACHINE_ID:-/etc/auto-certs/machine_id}"
 # the conf file omits BASE_DOMAIN (the §75 server-authoritative pattern).
 STATE_DIR="${AUTO_CERTS_STATE_DIR:-/var/lib/auto-certs/state}"
 
+# §117 (v0.4.0-rc13): augment PATH so CP reload hooks calling `service`,
+# `systemctl`, `iptables`, or any other /usr/sbin- or /sbin-resident
+# command work under cron. Cron's default PATH on Debian/Ubuntu is
+# `/usr/bin:/bin` only — CPs typically test their reload.sh interactively
+# (where PATH includes /usr/sbin) and don't notice the discrepancy until
+# the next 03:46 tick when `service nginx reload` exits "command not
+# found". Surfaced by jsny (成都重錘) 2026-05-18: hook worked on
+# 2026-05-15 16:53 manual ssh test, then silently failed every 03:46
+# cron tick for 4 consecutive nights with "FATAL: service command not
+# in PATH". The cert had been on disk that whole time; nginx kept
+# serving the prior cert because the hook couldn't move + reload.
+#
+# Defense-in-depth — the proximate fix is the CP editing their own
+# reload.sh, but auto-certs can prevent the entire class of failure for
+# every current + future CP by augmenting once here. Idempotent: only
+# prepends entries not already in PATH, so re-execution under richer
+# shells (operator SSH) doesn't bloat PATH with duplicates.
+case ":${PATH:-}:" in
+    *:/usr/sbin:*) : ;;
+    *)             PATH="/usr/sbin${PATH:+:$PATH}" ;;
+esac
+case ":$PATH:" in
+    *:/sbin:*) : ;;
+    *)         PATH="$PATH:/sbin" ;;
+esac
+export PATH
+
 # ---- CLI parsing ---------------------------------------------------------
 MODE="run"
 APP_FILTER=""
