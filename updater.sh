@@ -17,11 +17,42 @@
 
 set -eu
 
+# §120 / NEW-4 (2026-05-19): Emergency disable flag — operator-touchable
+# kill switch. If updater.sh misbehaves in the field (bad flip cycle,
+# accidental traffic spike against our server, etc.) the CP can
+# `touch /etc/auto-certs/disabled` to stop all update activity without
+# editing the cron entry. Removing the file resumes updates on the
+# next tick. Silent exit so a disabled host doesn't fill /var/log.
+# Symmetric with the same check launcher.sh honors.
+if [ -f "${AUTO_CERTS_DISABLED:-/etc/auto-certs/disabled}" ]; then
+    exit 0
+fi
+
 INSTALL_ROOT="${AUTO_CERTS_INSTALL_ROOT:-/opt/auto-certs}"
 CONF_DIR="${AUTO_CERTS_CONF_DIR:-/etc/auto-certs/conf.d}"
 MACHINE_ID_PATH="${AUTO_CERTS_MACHINE_ID:-/etc/auto-certs/machine_id}"
 LOG_FILE="${AUTO_CERTS_UPDATER_LOG:-/var/log/auto-certs/updater.log}"
 PAYLOAD_LIB="${INSTALL_ROOT}/current/lib"
+
+# §120 / NEW-7 (2026-05-19): Concurrency guard. Only one updater.sh at
+# a time per host. POSIX-portable mkdir test-and-set (works on CentOS 6
+# which lacks flock(1)). Stale-lock recovery: if the lock dir is older
+# than 1h (way longer than any legitimate updater run), force-remove
+# and continue — covers the case where a prior updater was SIGKILL'd
+# without trap cleanup.
+LOCK_DIR="${AUTO_CERTS_UPDATER_LOCK:-/var/lock/auto-certs-updater.lock.d}"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    if [ -d "$LOCK_DIR" ] && [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then
+        # Stale lock from a SIGKILL'd prior run; recover.
+        rm -rf "$LOCK_DIR" 2>/dev/null || true
+        mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+    else
+        # Healthy concurrent updater is running, OR /var/lock is
+        # read-only on a hardened CP host. Either way, skip silently.
+        exit 0
+    fi
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 
 # NEW-39 (CHANGELOG §43): bundled Mozilla CA bundle for old hosts
 # (CentOS 6's 2013-era ca-certificates can't validate GitHub TLS).
@@ -175,6 +206,21 @@ SIG_URL=$(printf '%s' "$SIG_URL" | sed 's#\\/#/#g')
 rm -f "$RESP" "${RESP}.headers"
 
 [ -n "$ASSIGNED" ] || { log_info "no assignment; assigned_ref:null"; exit 0; }
+
+# §120 / NEW-6 (2026-05-19): assigned_ref shape validation. Defense
+# against a compromised server (or buggy JSON parse) shipping a value
+# that would traverse paths via the next two STAGING/PAYLOAD_NEW
+# interpolations. Wire format is always `vMAJOR.MINOR.PATCH[-rcN]`
+# per docs/versioning.md; anything else is rejected. RSA sig protects
+# tarball BYTES; this check protects the FILENAME we construct.
+case "$ASSIGNED" in
+    v[0-9]*.[0-9]*.[0-9]*) ;;                                # vX.Y.Z
+    v[0-9]*.[0-9]*.[0-9]*-rc[0-9]*) ;;                       # vX.Y.Z-rcN
+    v[0-9]*.[0-9]*.[0-9]*-beta[0-9]*) ;;                     # vX.Y.Z-betaN
+    v[0-9]*.[0-9]*.[0-9]*-alpha[0-9]*) ;;                    # vX.Y.Z-alphaN
+    *) log_error "rejecting malformed assigned_ref: $ASSIGNED"; exit 0 ;;
+esac
+
 [ "$ASSIGNED" = "$CURRENT_TARGET" ] && { log_info "already on $ASSIGNED"; exit 0; }
 [ -n "$REL_URL" ] && [ -n "$SIG_URL" ] || { log_error "URLs missing in launcher_check response"; exit 0; }
 
@@ -187,8 +233,24 @@ SIG="${STAGING}/release.tar.gz.release.sig"
 http_get "$REL_URL" "$TARBALL" || { log_error "tarball fetch failed"; rm -rf "$STAGING"; exit 0; }
 http_get "$SIG_URL" "$SIG"     || { log_error "sig fetch failed";     rm -rf "$STAGING"; exit 0; }
 
-# Verify against the pinned RSA-4096 server pubkey (same as bundle envelope).
-PUBKEY="${PAYLOAD_LIB}/server-pubkey.pem"
+# Verify against the pinned RSA-4096 server pubkey (same key install.sh
+# embeds + same key bundle envelopes use).
+#
+# §120 / NEW-13 (2026-05-19): trust root LIVES OUTSIDE the auto-updating
+# area. Pre-rc15, the pubkey was read from `${PAYLOAD_LIB}/server-
+# pubkey.pem` — inside the very payload we're about to swap. If a
+# malicious payload ever got through self-check it could rotate its
+# own pubkey, then the next updater tick would happily verify the next
+# attacker tarball against the attacker key. Now we read from
+# `${INSTALL_ROOT}/server-pubkey.pem` (written ONCE by install.sh from
+# the install.sh-embedded heredoc, never touched by the rolling
+# payload). The PAYLOAD_LIB fallback preserves backwards-compat for
+# hosts installed before rc15 — they'll keep working off the legacy
+# in-payload key until their CP re-runs install.sh.
+PUBKEY="${INSTALL_ROOT}/server-pubkey.pem"
+if [ ! -r "$PUBKEY" ]; then
+    PUBKEY="${PAYLOAD_LIB}/server-pubkey.pem"
+fi
 if ! verify_signature "$TARBALL" "$SIG" "$PUBKEY"; then
     log_error "release signature verification FAILED for ${ASSIGNED}; refusing to flip"
     rm -rf "$STAGING"; exit 0

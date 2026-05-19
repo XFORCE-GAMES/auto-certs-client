@@ -214,7 +214,19 @@ jobs:
           tag_name: ${{ steps.version.outputs.version }}
           name: ${{ steps.version.outputs.version }}
           draft: false
-          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          # §97.4 / §120 permanent fix: pre-v1.0.0 the 0.x series IS the
+          # production fleet (popstone/jljj/jsny live on 0.4.0-rcN tags).
+          # Marking every rcN as `prerelease: true` (the SemVer-strict
+          # behavior) breaks the `/releases/latest/download/install.sh`
+          # one-liner because GitHub excludes prereleases from /latest/.
+          # Pre-1.0: force prerelease=false + make_latest=true so every
+          # 0.x tag is the canonical install target. Post-1.0: revert to
+          # SemVer semantics — tags with `-` are prereleases, GitHub's
+          # default `make_latest: legacy` picks the most recent GA.
+          # The condition keys on the tag prefix because tags are `vX.Y.Z`
+          # with the `v` (per `Resolve version from tag` step above).
+          prerelease: ${{ !startsWith(steps.version.outputs.version, 'v0.') && contains(steps.version.outputs.version, '-') }}
+          make_latest: ${{ startsWith(steps.version.outputs.version, 'v0.') && 'true' || 'legacy' }}
           generate_release_notes: true
           body: |
             ## Verifying this release

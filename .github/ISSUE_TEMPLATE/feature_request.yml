@@ -1,0 +1,78 @@
+name: Feature request
+description: Suggest a new capability, config option, or doc improvement.
+title: "[Feature] "
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest an improvement.
+
+        Two things to know about the project's scope before you file:
+
+        1. **The client is deliberately small.** We push complexity to
+           the server side wherever possible (the design rationale is
+           "CP hosts are unreachable black boxes, so we minimize what
+           runs there"). Features that grow the client get pushback
+           by default.
+
+        2. **The contract surface is frozen at v1.0.0** — config-file
+           shape, reload-hook env vars, on-disk paths. See
+           `docs/versioning.md`. "Add a CLI flag for X" is more likely
+           to land than "rewrite the payload loop."
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: |
+        Describe the underlying need, not just the proposed solution.
+        We frequently find that the right fix is different from the
+        first thing that came to mind.
+      placeholder: |
+        e.g. "My reload hook needs to know which cert ALSO went stale
+        recently so I can `nginx -t` before reloading."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: What did you have in mind?
+      description: A sketch is fine. Code isn't required.
+      placeholder: |
+        e.g. "An additional env var `AUTO_CERTS_PRIOR_CERT_FINGERPRINT`
+        passed to the reload hook."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: |
+        What workarounds have you tried? What client-side / server-side
+        approaches did you weigh?
+    validations:
+      required: false
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: How would CPs be affected?
+      description: |
+        Would this be a config-file addition (opt-in), a new env var
+        the hook gets unconditionally, a new CLI flag, a behavior
+        change? Compatibility implications?
+    validations:
+      required: false
+
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else?
+      description: Links to similar features in other projects, prior art, etc.
+    validations:
+      required: false

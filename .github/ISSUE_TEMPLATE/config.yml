@@ -1,0 +1,21 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/XFORCE-GAMES/auto-certs-client/security/advisories/new
+    about: |
+      Security issues must go through the private channel. Do NOT open
+      a public issue for security problems — public disclosure before
+      a fix is in the field exposes every CP host running this code.
+  - name: Read the docs first
+    url: https://github.com/XFORCE-GAMES/auto-certs-client#readme
+    about: |
+      README covers install, verification, troubleshooting modes
+      (--validate-config, --once, --diagnose, --self-check), and the
+      CentOS 6 bootstrap workaround. Most "I can't install" issues are
+      already answered there.
+  - name: Versioning and stability commitments
+    url: https://github.com/XFORCE-GAMES/auto-certs-client/blob/main/docs/versioning.md
+    about: |
+      What v1.x.y promises to CPs (API stability, self-update path,
+      reload-hook contract, on-disk layout). Helpful before filing a
+      "this should change" feature request.

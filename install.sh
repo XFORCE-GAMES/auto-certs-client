@@ -549,6 +549,20 @@ if [ ! -f "${INSTALL_ROOT}/cacert.pem" ] && [ -r "$PAYLOAD_DEST/lib/cacert.pem" 
     echo "auto-certs install: seeded ${INSTALL_ROOT}/cacert.pem from bundled payload"
 fi
 
+# §120 / NEW-13 (2026-05-19): write the pinned RSA-4096 release-signing
+# public key to ${INSTALL_ROOT}/server-pubkey.pem — OUTSIDE the auto-
+# updating payload area. updater.sh reads from here first, so the trust
+# anchor isn't rotatable by a future malicious payload. The source is
+# the SAME heredoc that install.sh used to verify THIS tarball's
+# signature (see `_release_pubkey_pem` at the top of this file) — so
+# the byte sequence here is exactly what every CP MIS team reading
+# install.sh can audit. Write unconditionally on every install run so
+# a rc15-era re-install on an older-rc-installed host promotes the
+# trust root to its install-root location.
+_release_pubkey_pem > "${INSTALL_ROOT}/server-pubkey.pem"
+chmod 0644 "${INSTALL_ROOT}/server-pubkey.pem" 2>/dev/null || true
+echo "auto-certs install: wrote pinned release-signing pubkey to ${INSTALL_ROOT}/server-pubkey.pem"
+
 # Atomic-flip the `current` symlink.
 ln -sfT "$PAYLOAD_DEST" "$INSTALL_ROOT/current.tmp" 2>/dev/null || \
     ln -sf "$PAYLOAD_DEST" "$INSTALL_ROOT/current.tmp"

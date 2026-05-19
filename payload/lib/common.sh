@@ -41,11 +41,23 @@ log_line() {
 # log lines + report payloads. The regex matches:
 #   - acert_(live|test)_<43 base62>      (full bearer plaintext)
 #   - dl_<43 base62>                     (full download token)
-#   - 43-char base62 chunks surrounded by non-alnum (bundle-pwd shape)
+#   - named-secret assignments           (envdump from a crashed hook,
+#     `set -x` trace, debug echo by a CP); covers BUNDLE_PASSWORD /
+#     API_TOKEN / JKS_PASSWORD in `KEY=value`, `KEY = value`,
+#     `KEY: value`, and `'KEY' => 'value'` shapes.
+#
+# §119 / NEW-43 (2026-05-19): the original comment claimed a third
+# "43-char base62 chunks surrounded by non-alnum" pattern that was
+# NEVER implemented. Aggressive 43-char-chunk redaction has too many
+# false positives (cert serials, UUIDs-stripped-of-dashes, base64
+# fragments of unrelated data, etc.) — we picked the safer
+# named-secret approach instead, which catches the realistic leak
+# path (env dumped to log on hook crash) without surprising matches.
 redact() {
     sed -E \
         -e 's/acert_(live|test)_[A-Za-z0-9]{43}/[REDACTED_TOKEN]/g' \
-        -e 's/dl_[A-Za-z0-9]{43}/[REDACTED_DLTOKEN]/g'
+        -e 's/dl_[A-Za-z0-9]{43}/[REDACTED_DLTOKEN]/g' \
+        -e 's/(BUNDLE_PASSWORD|API_TOKEN|JKS_PASSWORD)([[:space:]]*[=:][[:space:]]*)[^[:space:]'"'"'"]+/\1\2[REDACTED_SECRET]/g'
 }
 
 # Run a command with a timeout. Falls back to a busy-wait polling loop on
