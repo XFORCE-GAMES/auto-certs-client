@@ -68,6 +68,53 @@
 
 set -eu
 
+# ---- pinned RSA-4096 release-signing public key --------------------------
+# This is the public half of the long-lived key the release pipeline uses
+# to sign every `*.tar.gz.release.sig` file (see docs/runbooks/
+# release-signing-key.md + docs/runbooks/release-client-version.md). The
+# private half lives in AWS Secrets Manager under
+# `auto-certs/release-signing-key`; nothing on this host ever sees it.
+#
+# Why pinned here (and not fetched at install time):
+#   1. The auto-fetch bootstrap path may run under
+#      `AUTO_CERTS_INSECURE_BOOTSTRAP=1` on old-trust-store hosts, where
+#      SHA256SUMS itself is fetched without TLS verification. Without an
+#      out-of-band trust anchor a network attacker could substitute both
+#      the tarball AND its SHA-256 entry. Pinning the verifying key in
+#      the installer script breaks that circular trust.
+#   2. The trust anchor SHIPS WITH the script the operator is already
+#      reading — same channel, no extra fetch, no extra "now trust this
+#      file" instruction in the runbook.
+#
+# Compromising this defense requires compromising the RSA-4096 private
+# key in AWS Secrets Manager (rotated per docs/runbooks/release-signing-
+# key.md), OR substituting this install.sh entirely (in which case the
+# attacker controls everything anyway and a stripped-out verify step is
+# only one of many possible tamperings — CP MIS audits install.sh as the
+# trust anchor).
+#
+# Matches client/payload/lib/server-pubkey.pem byte-for-byte. If you
+# rotate one, rotate the other in the same release — the public-repo CI
+# smoke test asserts they match.
+_release_pubkey_pem() {
+    cat <<'__RELEASE_PUBKEY_EOF__'
+-----BEGIN PUBLIC KEY-----
+MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAwgpekFnq06chWS/mb2rR
+7paZ7xmiHkRyYMKXhiNtBf6gy+Ymo7jgtgGLALGjV9ytV3wieZR6n6jv6L8grHWl
+2lA2L7t0iA19vdxypyPiBq9oQOhM5XhZbqNdlk8YD45F3seDf+ygR/tu/T5Yf5FO
+dZjyc5rxl+04lqk2rHmjZVQG5wibx7TVM/kqgK4zjkedHaVdmNSCVkVym+Cst94N
+SfWu7A14RoXWjB14HFgd5lR0tTIcHUlaDhPTPm/NEYfu4JXwT+4b9R+dZRAXcJx3
+KeRAENhK3MnKIyt2MJVJV3zI/o4cPLNmQ5PGSofVbJ62yvc7b6jh4nfXa3oeWVVD
+MI6UOEpI/zl1uYzMEZzoI77AaYOzFQJGMQ+oRoF1Lx2EjULV6Yd1W5XWdoOA6pAr
+vEvsqcZ4hjPez5M5/M3mTfdM9gNinj8L72bwUkh/RGOwAvH7A5C4bqsDqW121VPN
+MhwGHqDXXMB5sX21W+3NLOQB4c5ofFHLTdJqsJgq4ggJfUzMRt+5p5VhwwVeSTLF
+jErB0MsC7t0UNPnIsDkkzvci8nj4l6hxX0XM4kcqZGBh5WRbk9OPgly/1vTULHbU
+JrI/JV0zQYikFTI1JJIaLAK3NAOjJfprcyBQH6jbJRD5kDROVD8YYUhx4kVS6zTI
+Ike7n1jbulCfr0VonlLglXUCAwEAAQ==
+-----END PUBLIC KEY-----
+__RELEASE_PUBKEY_EOF__
+}
+
 # ---- arg parsing ---------------------------------------------------------
 APP_CODE=""
 SERVER_URL="https://auto-certs.xforce-games.com"
@@ -366,9 +413,78 @@ if [ -z "$SOURCE_DIR" ]; then
             || { echo "auto-certs install: tarball SHA-256 mismatch — refusing to install" >&2; exit 1; }
     fi
     echo "auto-certs install: SHA-256 verified"
-    tar -xzf "${BOOT_TMP}/${TGZ_NAME}" -C "$BOOT_TMP"
+
+    # ---- RSA-4096 release-signature verify (NEW-40 / NEW-41 closure) -----
+    # Defense-in-depth on top of the SHA-256 check above:
+    #   - SHA-256 catches mid-transfer corruption + signed-but-misuploaded
+    #     artifact mixups, and is the only check that works when the
+    #     release pipeline itself is intact but the network isn't.
+    #   - The RSA detached signature catches a compromised release pipeline
+    #     that could publish a malicious tarball with a SHA-256 entry that
+    #     matches it. The verifying key is pinned in this file (see
+    #     `_release_pubkey_pem` at the top), so substituting it requires
+    #     compromising AWS Secrets Manager.
+    #   - Under AUTO_CERTS_INSECURE_BOOTSTRAP=1 the SHA256SUMS bytes
+    #     themselves arrive without TLS verification. The pinned-key
+    #     signature is what breaks that circular trust — the attacker
+    #     would have to forge an RSA-4096 signature, not just substitute
+    #     a different hash file.
+    RELEASE_PUBKEY_FILE="${BOOT_TMP}/release-pubkey.pem"
+    _release_pubkey_pem > "$RELEASE_PUBKEY_FILE"
+    chmod 0644 "$RELEASE_PUBKEY_FILE" 2>/dev/null || true
+    echo "auto-certs install: fetching ${TGZ_NAME}.release.sig"
+    _ac_fetch "${GH_BASE}/${TGZ_NAME}.release.sig" "${BOOT_TMP}/${TGZ_NAME}.release.sig" || {
+        echo "auto-certs install: failed to fetch ${TGZ_NAME}.release.sig — refusing to install" >&2
+        echo "auto-certs install:   Every published release MUST carry a .release.sig file." >&2
+        echo "auto-certs install:   A missing signature is itself a signal something is wrong." >&2
+        exit 1
+    }
+    if ! openssl dgst -sha256 -verify "$RELEASE_PUBKEY_FILE" \
+            -signature "${BOOT_TMP}/${TGZ_NAME}.release.sig" \
+            "${BOOT_TMP}/${TGZ_NAME}" >/dev/null 2>&1; then
+        echo "auto-certs install: RSA-4096 release-signature verification FAILED — refusing to install" >&2
+        echo "auto-certs install:   Verify on the GitHub release page directly. Do NOT bypass this check." >&2
+        echo "auto-certs install:   If the pinned key was rotated in a release you trust, fetch a fresh install.sh" >&2
+        echo "auto-certs install:   from /releases/latest/download/install.sh and re-run." >&2
+        exit 1
+    fi
+    echo "auto-certs install: RSA-4096 release-signature verified"
+
+    # ---- pre-extraction path-traversal validation (NEW-42 part 1) --------
+    # Reject any tarball that contains absolute paths or `..` components
+    # before we ask tar to extract it. POSIX tar follows what it's told;
+    # an attacker tarball could plant files at `/etc/cron.daily/evil`,
+    # `/root/.ssh/authorized_keys`, etc. Tarballs the pipeline produces
+    # always live entirely under `auto-certs-client-<ver>/` so any entry
+    # outside that subtree is an immediate red flag.
+    if tar -tzf "${BOOT_TMP}/${TGZ_NAME}" 2>/dev/null | grep -Eq '(^/|(^|/)\.\./)' ; then
+        echo "auto-certs install: tarball contains absolute or .. path entries — refusing to install" >&2
+        exit 1
+    fi
+
+    # ---- hardened tar extract (NEW-42 part 2) ----------------------------
+    #   --no-overwrite-dir: a tarball entry that names an existing dir is
+    #     refused rather than silently followed (defends against a tarball
+    #     pre-creating a symlink and then writing through it).
+    #   --no-same-owner: do NOT chown extracted files to the UID/GID baked
+    #     into the tarball headers (defends against an attacker tarball
+    #     that ships a setuid binary owned by root when install.sh runs
+    #     as root).
+    # Both flags are POSIX-portable across GNU tar and BSD tar on every
+    # floor target (CentOS 6.8 / 7.9 / Ubuntu 16.04).
+    tar -xzf "${BOOT_TMP}/${TGZ_NAME}" -C "$BOOT_TMP" --no-overwrite-dir --no-same-owner
     SOURCE_DIR="${BOOT_TMP}/${TGZ_NAME%.tar.gz}"
     [ -d "$SOURCE_DIR" ] || { echo "auto-certs install: extracted dir missing: $SOURCE_DIR" >&2; exit 1; }
+
+    # ---- post-extraction sanity check (NEW-42 part 3) --------------------
+    # Defense against an attacker tarball whose entry names look benign
+    # under `tar -tzf` but whose extracted-on-disk form is a symlink
+    # pointing outside $BOOT_TMP. Belt-and-braces with the pre-extract
+    # path-traversal scan above.
+    if [ -L "$SOURCE_DIR" ] || [ -L "$SOURCE_DIR/payload" ] || [ -L "$SOURCE_DIR/launcher.sh" ]; then
+        echo "auto-certs install: extracted tree contains symlinks at expected paths — refusing to install" >&2
+        exit 1
+    fi
 fi
 if [ ! -d "$SOURCE_DIR/payload" ] || [ ! -r "$SOURCE_DIR/launcher.sh" ]; then
     echo "install: --source-dir does not look like an auto-certs client tree" >&2
