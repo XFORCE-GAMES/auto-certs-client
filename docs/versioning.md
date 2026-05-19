@@ -61,7 +61,15 @@ When `v1.0.0` ships, we commit to:
 5. **install.sh integrity floor.** Every published release tarball
    carries:
    - `<tarball>.release.sig` — RSA-4096 detached signature,
-     verifiable against the pinned public key in `install.sh` itself.
+     verifiable against the pinned public key embedded in
+     `install.sh` (heredoc) AND written by `install.sh` at install
+     time to `${INSTALL_ROOT}/server-pubkey.pem`
+     (`/opt/auto-certs/server-pubkey.pem`). Post-v0.4.0-rc15 the
+     install-root copy is the durable trust root — `updater.sh`
+     reads from there for every subsequent verification, so a
+     future malicious payload can't rotate its own pubkey to forge
+     a release signature. The `payload/lib/server-pubkey.pem` copy
+     is kept for backwards-compat with pre-rc15 installs.
    - `<tarball>.sigstore.json` — cosign-keyless Sigstore bundle, for
      transparency-log auditing by anyone who wants to verify the
      pipeline ran cleanly.
@@ -84,7 +92,9 @@ Any of:
   requires a coordinated client/server upgrade (not just additive
   fields).
 - **Pinned `release-signing` public key rotation** — the pinned key
-  in `install.sh` changes. Because the new install.sh can't verify
+  in `install.sh` (and the matching `${INSTALL_ROOT}/server-pubkey.pem`
+  it writes at install time) changes. Because the new install.sh
+  can't verify
   releases signed by the old key (and vice-versa), this is a hard
   break in the "fetch a fresh install.sh and re-run" sense. We treat
   a key rotation as a MAJOR bump even though no other contract

@@ -64,7 +64,7 @@ body:
       description: |
         Output of `cat /opt/auto-certs/current/VERSION` (or, if that
         path doesn't exist, the version from your install command).
-      placeholder: "0.4.0-rc14"
+      placeholder: "0.4.0-rc15"
     validations:
       required: true
 
