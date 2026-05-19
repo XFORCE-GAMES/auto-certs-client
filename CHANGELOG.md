@@ -37,10 +37,9 @@ install-flow trust-boundary items filed against pre-rc14 install.sh.
 
 ### Operational
 
-- Reload-hook env vars (`AUTO_CERTS_APP_CODE`, `AUTO_CERTS_CERT_DIR`)
-  are now exported with idempotent PATH augmentation (`/usr/sbin`
-  prepend + `/sbin` append) so reload commands like `service nginx
-  reload` resolve correctly under cron's minimal default PATH.
+No payload or behavior changes — rc14 is install-path-only hardening.
+The PATH augmentation that lets reload hooks find `/usr/sbin` commands
+under cron shipped in rc13 below.
 
 ## [v0.4.0-rc13] — 2026-05-18
 
