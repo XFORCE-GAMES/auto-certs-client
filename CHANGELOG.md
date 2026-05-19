@@ -7,8 +7,86 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioned per [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Pre-1.0 releases used `-rcN` suffixes for staged rollouts; post-1.0
 pre-releases use SemVer pre-release identifiers only for actual
-release candidates (see [`docs/runbooks/versioning.md`](https://github.com/XFORCE-GAMES/auto-certs-client/blob/main/docs/runbooks/versioning.md)
-if your operator has published the versioning policy).
+release candidates (see [`docs/versioning.md`](docs/versioning.md)
+for the full policy).
+
+## [v0.4.0-rc15] — 2026-05-19
+
+### Security
+
+- **Trust root moved OUT of the auto-updating area.** Pre-rc15,
+  `updater.sh` read the RSA-4096 release-signing pubkey from
+  `payload/lib/server-pubkey.pem` — inside the very payload it was
+  about to swap. If a malicious payload ever got through staged-
+  rollout self-check, it could rotate its own pubkey, and the next
+  `updater.sh` tick would happily verify the next attacker tarball
+  against the attacker key. Post-rc15, `install.sh` writes the
+  pinned pubkey from its own embedded heredoc to
+  `${INSTALL_ROOT}/server-pubkey.pem` (`/opt/auto-certs/server-pubkey.pem`)
+  at install time, and `updater.sh` reads from there first — outside
+  the auto-updating area, never touched by the rolling payload.
+  Backwards-compat fallback to the in-payload copy preserves
+  existing pre-rc15 installs unchanged. Closes the
+  install-once-can't-fix-later trust-rotation hole.
+- **Emergency disable flag for `updater.sh`**: `touch /etc/auto-certs/disabled`
+  stops all update activity without editing the cron entry. Silent
+  exit so a disabled host doesn't fill `/var/log`. Path overridable
+  via `AUTO_CERTS_DISABLED` env var. Operator-touchable kill switch
+  for when something misbehaves in the field.
+- **`assigned_ref` shape validation**: `updater.sh` now rejects any
+  server-supplied `assigned_ref` that doesn't match
+  `vMAJOR.MINOR.PATCH[-(rc|beta|alpha)N]` before interpolating it
+  into filesystem paths. Defense against a compromised server (or
+  buggy JSON parse) shipping path-traversal characters that would
+  escape `${INSTALL_ROOT}/staging/${ASSIGNED}` or
+  `${INSTALL_ROOT}/payload-${ASSIGNED}`. The RSA signature protects
+  tarball bytes; this `case` statement protects the filename the
+  client constructs from server input.
+- **Concurrent-updater mutex**: `mkdir`-based test-and-set at
+  `/var/lock/auto-certs-updater.lock.d` (POSIX-portable; works on
+  CentOS 6 which lacks `flock(1)`). Stale-lock recovery via
+  `find -mmin +60` covers SIGKILL'd prior runs. Prevents two
+  `updater.sh` processes from racing the symlink swap if a CP
+  added a second cron entry or a saturated host's tick runs long.
+- **`redact()` honest named-secret patterns**: `payload/lib/common.sh`
+  `redact()` function now redacts `BUNDLE_PASSWORD=value`,
+  `API_TOKEN: value`, `JKS_PASSWORD = value` shapes — covering the
+  realistic leak path (env dumped to log by a crashed CP reload
+  hook). Pre-rc15 the function's comment promised a "43-char base62
+  chunks" pattern that was never implemented; the safer
+  named-secret approach catches the actual leak shapes without
+  false-positive risk on cert serials, UUIDs-stripped-of-dashes,
+  or unrelated base64 fragments.
+
+Together these close NEW-4 / NEW-6 / NEW-7 / NEW-13 / NEW-43 —
+five of the v1.0.0-gate hardening items filed against pre-rc15
+client. Combined with rc14's NEW-40/41/42 (`install.sh` hardening),
+the install-once surface — `install.sh` + `launcher.sh` +
+`updater.sh` — is fully hardened before v1.0.0 freezes it.
+
+### Operational
+
+- **First release auto-published as Latest without manual
+  intervention.** Pre-rc15, every `v0.4.0-rcN` tag was incorrectly
+  marked `prerelease: true` by the release workflow, which broke the
+  `curl .../releases/latest/download/install.sh` install one-liner.
+  Operator workaround was `gh release edit --prerelease=false
+  --latest=true` after every cut (≈20 manual promotes over a month).
+  Rc15 ships the permanent fix in `.github/workflows/release.yml`:
+  any `v0.*` tag now publishes as `prerelease=false + make_latest=true`
+  by default; post-1.0.0 the workflow reverts to SemVer-strict
+  semantics. v0.4.0-rc15 itself was the first cut to validate this
+  end-to-end.
+
+### Where to look
+
+- `${INSTALL_ROOT}/server-pubkey.pem` — the new trust-root location
+  (rc15+). Auditable by `cat`; matches the heredoc near the top of
+  `install.sh` byte-for-byte.
+- `/etc/auto-certs/disabled` — touch this file to halt updates
+  without editing cron (rc15+).
+- `payload/lib/server-pubkey.pem` — legacy fallback for pre-rc15
+  installs; still present in the tarball for backwards-compat.
 
 ## [v0.4.0-rc14] — 2026-05-19
 

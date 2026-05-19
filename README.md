@@ -193,7 +193,7 @@ that directory should normally be empty.
 │       ├── crypto.sh         ← openssl wrappers (sig verify, decrypt, x509)
 │       ├── atomic.sh         ← atomic mv helpers
 │       ├── report.sh         ← report-back assembly + redaction
-│       ├── server-pubkey.pem ← pinned RSA-4096 key (same as install.sh embeds)
+│       ├── server-pubkey.pem ← legacy in-payload trust anchor (pre-v0.4.0-rc15 fallback)
 │       └── cacert.pem        ← Mozilla NSS CA bundle (refreshed via updater.sh)
 ├── reload.sh.placeholder     ← explanatory comments + `exit 1` body
 ├── conf.d/
@@ -222,10 +222,17 @@ that directory should normally be empty.
 - **Standard `unzip` does NOT decrypt AES ZIPs** — we don't ship ZIP.
   The bundle is `tar` + `openssl enc -aes-256-cbc`.
 - **Detached signature verification is a HARD pre-condition on
-  decrypt**. The pinned RSA-4096 public key in
-  `payload/lib/server-pubkey.pem` (matched byte-for-byte by the
-  install.sh heredoc) verifies the server's signature on every
-  encrypted envelope BEFORE we attempt decrypt.
+  decrypt**. The pinned RSA-4096 public key — written to
+  `${INSTALL_ROOT}/server-pubkey.pem` (`/opt/auto-certs/server-pubkey.pem`)
+  by `install.sh` at install time from its own embedded heredoc —
+  verifies the server's signature on every encrypted envelope
+  BEFORE we attempt decrypt. The same key file (byte-identical to
+  the `install.sh` heredoc) is the durable trust root for `updater.sh`
+  too; it lives OUTSIDE the auto-updating payload area so a future
+  malicious payload can't rotate its own pubkey to forge a release
+  signature. (Pre-v0.4.0-rc15 installs read from
+  `payload/lib/server-pubkey.pem` which is still shipped as a
+  backwards-compat fallback.)
 - **No auto-rollback on reload-hook failure**. New bundle stays on
   disk; old in-memory cert keeps serving until something reloads.
   Failure is reported back; the operator alerts the CP through the
