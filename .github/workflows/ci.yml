@@ -89,7 +89,7 @@ jobs:
           install_loc=$(wc -l < install.sh)
           echo "launcher.sh                         : $launcher_loc lines (cap: 80)"
           echo "payload/auto_certs.sh + lib/*.sh    : $payload_loc lines (cap: 2300)"
-          echo "install.sh                          : $install_loc lines (cap: 660)"
+          echo "install.sh                          : $install_loc lines (cap: 800)"
           fail=0
           [ "$launcher_loc" -le 80 ] || { echo "::error::launcher.sh exceeds cap"; fail=1; }
           # Cap bumped 1500→1600 in v0.3.0-rc7 to accommodate NEW-39 fix
@@ -167,9 +167,20 @@ jobs:
           # CHANGELOG §104) for _ac_try_bootstrap_cacert helper +
           # _ac_fetch retry-on-cert-error + end-of-install cacert seed
           # (~70 LOC). 620 measured; 660 leaves headroom.
+          # install.sh cap bumped 660→800 in v0.4.0-rc14 (auto-certs server
+          # CHANGELOG §119) for the NEW-40/41/42 install.sh hardening:
+          # _release_pubkey_pem() function with embedded RSA-4096 pubkey
+          # heredoc (~30 LOC), RSA signature verify block before extract
+          # (~25 LOC), pre-extraction `tar -tzf | grep -Eq` path-traversal
+          # scan, hardened tar flags (--no-overwrite-dir --no-same-owner),
+          # post-extraction symlink sanity check (~10 LOC), and the
+          # CP-MIS-readable comment blocks documenting WHY each defense
+          # exists (~50 LOC). Total +116 LOC. 758 measured; 800 leaves
+          # headroom. v1.0.0 pre-release hardening — gates one of the
+          # three Phase 7b open items before the v1.0.0 cut.
           # Headroom is intentional — security fixes + functional features
           # shouldn't be gated by a cosmetic LOC cap. Bump again if future
           # fixes legitimately push past.
           [ "$payload_loc"  -le 2300 ] || { echo "::error::payload total exceeds cap"; fail=1; }
-          [ "$install_loc"  -le 660 ] || { echo "::error::install.sh exceeds cap"; fail=1; }
+          [ "$install_loc"  -le 800 ] || { echo "::error::install.sh exceeds cap"; fail=1; }
           exit "$fail"
